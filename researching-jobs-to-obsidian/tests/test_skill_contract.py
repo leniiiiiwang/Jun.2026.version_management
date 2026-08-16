@@ -85,17 +85,19 @@ class SkillContractTests(unittest.TestCase):
         )
         for heading in headings:
             self.assertEqual(text.count(f"## {heading}"), 1)
-        for variable in ("{{company}}", "{{role}}", "{{recruiting_type}}", "{{city_scope}}", "{{date}}"):
+        for variable in ("{{company}}", "{{role}}", "{{recruiting_type}}", "{{city_scope}}", "{{date}}", "{{source_url}}"):
             self.assertIn(variable, text)
         for phrase in ("非官方样本", "不能推断", "竞争信号", "不是官方硬性门槛", "[[", "作者", "发布日期", "URL", "查询词", "等级", "媒介", "招聘类型", "城市", "局限"):
             self.assertIn(phrase, text)
-        self.assertIn("[^sample]: https://example.com/job-research/sample", text)
+        self.assertIn("[^source]: {{source_url}}", text)
+        self.assertIn("实际证据", text)
         rendered = (
             text.replace("{{company}}", "示例公司")
             .replace("{{role}}", "Data Analyst")
             .replace("{{recruiting_type}}", "校招")
             .replace("{{city_scope}}", "杭州")
             .replace("{{date}}", "2026-08-16")
+            .replace("{{source_url}}", "https://example.org/evidence/data-analyst")
         )
         with tempfile.TemporaryDirectory() as raw:
             output = Path(raw) / "rendered.md"
@@ -130,9 +132,12 @@ class SkillContractTests(unittest.TestCase):
     def test_attribution_agent_manifest_and_no_packaged_sensitive_data(self):
         license_text = read(LICENSE)
         self.assertIn("BrunonXU/Stride28-search2docs", license_text)
+        self.assertIn("https://github.com/BrunonXU/Stride28-search2docs", license_text)
         self.assertIn("MIT", license_text)
         self.assertIn("independent adaptation", license_text)
         self.assertIn("no vendoring", license_text)
+        self.assertIn("MCP <2", read(SETUP))
+        self.assertNotIn("MCP 2 client runtime", read(SETUP))
         self.assertEqual(
             read(AGENT),
             'interface:\n  display_name: "Job Research to Obsidian"\n  short_description: "低频采集岗位信息并生成可审计 Obsidian 岗位笔记"\n  default_prompt: "Use $researching-jobs-to-obsidian to research a company and role and write an evidence-graded Obsidian job brief."\n',

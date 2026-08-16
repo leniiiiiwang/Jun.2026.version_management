@@ -4,7 +4,7 @@ This reference is for installation, login, architecture, and runtime diagnosis o
 
 ## Install in an approved environment
 
-Request approval before installation, browser/network activity, or writes outside the workspace. On a clean environment, install the server and MCP 2 client runtime together:
+Request approval before installation, browser/network activity, or writes outside the workspace. On a clean environment, install the server with an MCP <2 / 1.x-compatible client runtime:
 
 ```bash
 uv tool install --python 3.11 --force --with 'mcp[cli]<2' 'stride28-search-mcp==0.2.1'
@@ -12,7 +12,7 @@ stride28-search-mcp doctor
 stride28-search-mcp install-browser
 ```
 
-Use native arm64 Python on Apple Silicon. The upstream 0.2.1 server imports `mcp.server.fastmcp`; an incompatible MCP 2 installation can break that import. The client uses an ordinary-Python bootstrap to re-exec into the tool interpreter when its MCP runtime is missing; diagnose with `stride28-search-mcp doctor` rather than mixing interpreters.
+Use native arm64 Python on Apple Silicon. The upstream 0.2.1 server imports `mcp.server.fastmcp`; incompatible newer MCP installations can break that import. The client uses an ordinary-Python bootstrap to re-exec into the tool interpreter when its MCP runtime is missing; diagnose with `stride28-search-mcp doctor` rather than mixing interpreters.
 
 ## Named profile and browser mode
 

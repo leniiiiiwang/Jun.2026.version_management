@@ -61,6 +61,6 @@ related: "[[相关岗位或公司笔记]]"
 
 | 编号 | 作者 | 发布日期 | URL | 查询词 | 等级 | 媒介 | 招聘类型 | 城市 | 局限 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| [^sample] | 待填 | 待填 | 见脚注 | {{role}} 面试 | C | Xiaohongshu | {{recruiting_type}} | {{city_scope}} | 模板示例，未核验 |
+| [^source] | 实际证据作者 | 实际发布日期 | [^source] | {{role}} 面试 | A/B/C | 实际媒介 | {{recruiting_type}} | {{city_scope}} | 实际证据的范围与局限 |
 
-[^sample]: https://example.com/job-research/sample
+[^source]: {{source_url}}

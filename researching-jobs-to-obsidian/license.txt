@@ -2,7 +2,9 @@ MIT License
 
 Copyright (c) 2026 BrunonXU/Stride28-search2docs
 
-This skill is an independent adaptation informed by BrunonXU/Stride28-search2docs. It contains no vendoring of that project and does not redistribute its code or data.
+This skill is an independent adaptation informed by BrunonXU/Stride28-search2docs
+(https://github.com/BrunonXU/Stride28-search2docs). It contains no vendoring
+of that project and does not redistribute its code or data.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
