@@ -301,6 +301,49 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [])
 
 
+class DefaultFetcherTests(unittest.IsolatedAsyncioTestCase):
+    class FakeResponse:
+        def __init__(self, body, headers=None):
+            self.body = body
+            self.headers = {} if headers is None else headers
+            self.read_sizes = []
+            self.closed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            self.closed = True
+
+        def read(self, size):
+            self.read_sizes.append(size)
+            return self.body[:size]
+
+    async def test_default_fetcher_allows_body_at_or_below_limit(self):
+        response = self.FakeResponse(b"abc", {"Content-Type": "image/png", "Content-Length": "3"})
+        with patch.object(downloader, "MAX_IMAGE_BYTES", 3), patch.object(downloader, "urlopen", return_value=response):
+            content, content_type = await downloader.default_fetcher("https://cdn.test/image")
+        self.assertEqual((content, content_type), (b"abc", "image/png"))
+        self.assertEqual(response.read_sizes, [4])
+        self.assertTrue(response.closed)
+
+    async def test_default_fetcher_rejects_oversized_content_length_before_reading(self):
+        response = self.FakeResponse(b"", {"Content-Length": "4"})
+        with patch.object(downloader, "MAX_IMAGE_BYTES", 3), patch.object(downloader, "urlopen", return_value=response):
+            with self.assertRaises(ValueError):
+                await downloader.default_fetcher("https://cdn.test/image")
+        self.assertEqual(response.read_sizes, [])
+        self.assertTrue(response.closed)
+
+    async def test_default_fetcher_rejects_chunked_body_that_exceeds_limit(self):
+        response = self.FakeResponse(b"abcd", {"Content-Type": "image/jpeg"})
+        with patch.object(downloader, "MAX_IMAGE_BYTES", 3), patch.object(downloader, "urlopen", return_value=response):
+            with self.assertRaises(ValueError):
+                await downloader.default_fetcher("https://cdn.test/image")
+        self.assertEqual(response.read_sizes, [4])
+        self.assertTrue(response.closed)
+
+
 class CliTests(unittest.TestCase):
     def test_selected_id_file_rejects_duplicates_case_collisions_and_unsafe_ids(self):
         with tempfile.TemporaryDirectory() as raw:

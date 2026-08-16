@@ -23,6 +23,8 @@ CONTENT_TYPE_EXTENSIONS = {
     "image/gif": ".gif",
 }
 RESERVED_IDS = {"run_summary", "download_manifest"}
+# Cap in-memory response buffering for untrusted direct image URLs.
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
 
 def _safe_note_id(value):
@@ -219,7 +221,16 @@ async def default_fetcher(url):
     def fetch():
         request = Request(url, headers={"User-Agent": "selected-note-image-downloader/1.0"})
         with urlopen(request, timeout=20) as response:  # nosec B310 - URL is allowlisted by caller
-            return response.read(), response.headers.get("Content-Type", "")
+            try:
+                content_length = int(response.headers.get("Content-Length", ""))
+            except (TypeError, ValueError):
+                content_length = None
+            if content_length is not None and content_length > MAX_IMAGE_BYTES:
+                raise ValueError("image exceeds size limit")
+            content = response.read(MAX_IMAGE_BYTES + 1)
+            if len(content) > MAX_IMAGE_BYTES:
+                raise ValueError("image exceeds size limit")
+            return content, response.headers.get("Content-Type", "")
     return await asyncio.to_thread(fetch)
 
 
