@@ -1,9 +1,12 @@
 import asyncio
+from contextlib import asynccontextmanager, redirect_stdout
 import importlib.util
+import io
 import json
 import sys
 import tempfile
 from types import SimpleNamespace
+from types import ModuleType
 import unittest
 from pathlib import Path
 
@@ -61,7 +64,11 @@ class ArgumentTests(unittest.TestCase):
             xhs.item_arguments("detail", {"note_id": "123", "xsec_token": "t", "max_comments": 99}),
             {"note_id": "123", "xsec_token": "t", "max_comments": 50},
         )
-        for item in ({"note_id": ""}, {"note_id": "123", "max_comments": 0}):
+        self.assertEqual(
+            xhs.item_arguments("detail", {"note_id": "123", "max_comments": 0}),
+            {"note_id": "123", "xsec_token": "", "max_comments": 0},
+        )
+        for item in ({"note_id": ""}, {"note_id": "123", "max_comments": -1}):
             with self.subTest(item=item):
                 with self.assertRaises(ValueError):
                     xhs.item_arguments("detail", item)
@@ -86,6 +93,17 @@ class EnvelopeTests(unittest.TestCase):
 
 
 class ManifestTests(unittest.IsolatedAsyncioTestCase):
+    async def test_manifest_rejects_malformed_json_and_missing_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            malformed = Path(directory) / "malformed.json"
+            missing_mode = Path(directory) / "missing-mode.json"
+            malformed.write_text("{not-json", encoding="utf-8")
+            missing_mode.write_text(json.dumps({"items": []}), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                xhs._load_manifest(malformed, "search")
+            with self.assertRaises(ValueError):
+                xhs._load_manifest(missing_mode, "search")
+
     async def test_batch_cli_rejects_missing_items_before_opening_mcp(self):
         opened = False
 
@@ -94,8 +112,8 @@ class ManifestTests(unittest.IsolatedAsyncioTestCase):
             opened = True
             raise AssertionError("MCP must not open for an invalid manifest")
 
-        original_session = xhs.mcp_session
-        xhs.mcp_session = unexpected_session
+        original_session = xhs.open_mcp_session
+        xhs.open_mcp_session = unexpected_session
         try:
             with tempfile.TemporaryDirectory() as directory:
                 manifest = Path(directory) / "manifest.json"
@@ -107,7 +125,7 @@ class ManifestTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(ValueError):
                     await xhs._run_batch(args, "search")
         finally:
-            xhs.mcp_session = original_session
+            xhs.open_mcp_session = original_session
         self.assertFalse(opened)
 
     async def test_batch_does_not_sleep_after_its_last_attempt(self):
@@ -162,7 +180,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
                 ("search_xiaohongshu", {"query": "b", "limit": 1, "note_type": "all"}),
             ])
             self.assertEqual(waits, [12])
-            self.assertEqual(summary, {"total": 2, "attempted": 2, "succeeded": 2, "timed_out": 0, "other_failures": 0, "stop_reason": None})
+            self.assertEqual(summary, {"total": 2, "attempted": 2, "succeeded": 2, "timed_out": 0, "other_failures": 0, "stopped_on": None})
             record = json.loads((output_dir / "q01.json").read_text(encoding="utf-8"))
             self.assertEqual(record["key"], "q01")
             self.assertEqual(record["tool"], "search_xiaohongshu")
@@ -186,7 +204,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(calls, ["a", "b"])
             self.assertEqual(summary["timed_out"], 2)
             self.assertEqual(summary["attempted"], 2)
-            self.assertEqual(summary["stop_reason"], None)
+            self.assertEqual(summary["stopped_on"], None)
 
     async def test_each_risk_code_hard_stops_after_writing_current_record(self):
         for code in xhs.RISK_CODES:
@@ -210,7 +228,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(waits, [])
                     self.assertEqual(summary["attempted"], 1)
                     self.assertEqual(summary["other_failures"], 1)
-                    self.assertEqual(summary["stop_reason"], code)
+                    self.assertEqual(summary["stopped_on"], code)
                     self.assertTrue((output_dir / "first.json").exists())
                     self.assertFalse((output_dir / "second.json").exists())
 
@@ -224,7 +242,154 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
             )
             record = json.loads((Path(directory) / "one.json").read_text(encoding="utf-8"))
             self.assertFalse(record["envelope"]["ok"])
+            self.assertEqual(record["envelope"]["error"], {"code": "tool_call_failed", "message": "tool call failed"})
             self.assertEqual(summary["other_failures"], 1)
+
+    async def test_detail_output_uses_detail_tool_and_contract_shape(self):
+        async def call_tool(name, arguments):
+            self.assertEqual(name, "get_note_detail")
+            self.assertEqual(arguments, {"note_id": "123", "xsec_token": "t", "max_comments": 0})
+            return {"ok": True, "data": {"title": "note"}}
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            await xhs.execute_batch(
+                [{"key": "note-123", "note_id": "123", "xsec_token": "t", "max_comments": 0}],
+                "detail", call_tool, output_dir, 0,
+            )
+            record = json.loads((output_dir / "note-123.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            record,
+            {
+                "key": "note-123", "tool": "get_note_detail",
+                "arguments": {"note_id": "123", "xsec_token": "t", "max_comments": 0},
+                "envelope": {"ok": True, "data": {"title": "note"}},
+            },
+        )
+
+
+class McpBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_open_mcp_session_imports_lazily_and_initializes_once(self):
+        events = []
+        fake_mcp = ModuleType("mcp")
+        fake_client = ModuleType("mcp.client")
+        fake_client.__path__ = []
+        fake_stdio = ModuleType("mcp.client.stdio")
+
+        class Parameters:
+            def __init__(self, **kwargs):
+                events.append(("parameters", kwargs))
+
+        class Session:
+            def __init__(self, read_stream, write_stream):
+                events.append(("session", read_stream, write_stream))
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                events.append(("session_close",))
+
+            async def initialize(self):
+                events.append(("initialize",))
+
+        @asynccontextmanager
+        async def stdio_client(parameters):
+            events.append(("stdio", parameters))
+            yield ("read", "write")
+
+        fake_mcp.ClientSession = Session
+        fake_mcp.StdioServerParameters = Parameters
+        fake_stdio.stdio_client = stdio_client
+        saved = {name: sys.modules.get(name) for name in ("mcp", "mcp.client", "mcp.client.stdio")}
+        for name in saved:
+            sys.modules.pop(name, None)
+        self.assertNotIn("mcp", sys.modules)
+        try:
+            sys.modules.update({"mcp": fake_mcp, "mcp.client": fake_client, "mcp.client.stdio": fake_stdio})
+            async with xhs.open_mcp_session("fake-server", {"PATH": "/bin"}) as session:
+                self.assertIsInstance(session, Session)
+        finally:
+            for name, module in saved.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+        self.assertEqual(events[0], ("parameters", {"command": "fake-server", "args": [], "env": {"PATH": "/bin"}}))
+        self.assertEqual(events.count(("initialize",)), 1)
+
+
+class CliTests(unittest.IsolatedAsyncioTestCase):
+    async def test_all_cli_subcommands_apply_their_headless_rate_and_delay_contracts(self):
+        opened, calls = [], []
+
+        class Session:
+            async def list_tools(self):
+                calls.append(("list_tools",))
+                return {"tools": [{"name": "search_xiaohongshu"}]}
+
+            async def call_tool(self, name, arguments):
+                calls.append((name, arguments))
+                return {"ok": True, "data": {}}
+
+        @asynccontextmanager
+        async def fake_open(command, env):
+            opened.append((command, env))
+            yield Session()
+
+        original_open = xhs.open_mcp_session
+        xhs.open_mcp_session = fake_open
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                directory_path = Path(directory)
+                search_manifest = directory_path / "search.json"
+                detail_manifest = directory_path / "detail.json"
+                search_manifest.write_text(json.dumps({"mode": "search", "items": [{"key": "q1", "query": "a"}, {"key": "q2", "query": "b"}]}), encoding="utf-8")
+                detail_manifest.write_text(json.dumps({"mode": "detail", "items": [{"key": "n1", "note_id": "1"}, {"key": "n2", "note_id": "2"}]}), encoding="utf-8")
+                parser = xhs._parser()
+                commands = [
+                    ["list-tools", "--profile", "codex"],
+                    ["login", "--profile", "codex"],
+                    ["search-batch", str(search_manifest), "--output-dir", str(directory_path / "search-out"), "--profile", "codex"],
+                    ["detail-batch", str(detail_manifest), "--output-dir", str(directory_path / "detail-out"), "--profile", "codex"],
+                ]
+                parsed = [parser.parse_args(command) for command in commands]
+                self.assertEqual([args.delay for args in parsed[2:]], [12, 20])
+                self.assertEqual([args.rate_limit for args in parsed], ["12", "12", "12", "20"])
+                self.assertEqual([args.server_command for args in parsed], ["stride28-search-mcp"] * 4)
+                for args in parsed[2:]:
+                    args.delay = 0
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    for args in parsed:
+                        await xhs._main_async(args)
+        finally:
+            xhs.open_mcp_session = original_open
+        self.assertEqual([env["STRIDE28_XHS_HEADLESS"] for _, env in opened], ["true", "false", "true", "true"])
+        self.assertEqual([env["STRIDE28_RATE_LIMIT_SECONDS"] for _, env in opened], ["12", "12", "12", "20"])
+        self.assertEqual(len(opened), 4)
+        self.assertEqual(calls.count(("list_tools",)), 1)
+        self.assertEqual(calls.count(("login_xiaohongshu", {})), 1)
+        self.assertEqual(sum(name == "search_xiaohongshu" for name, *_ in calls if name != "list_tools"), 2)
+        self.assertEqual(sum(name == "get_note_detail" for name, *_ in calls if name != "list_tools"), 2)
+
+    async def test_login_prints_only_allowlisted_result_fields(self):
+        @asynccontextmanager
+        async def fake_open(command, env):
+            class Session:
+                async def call_tool(self, name, arguments):
+                    return {"ok": False, "error": {"code": "not_logged_in", "secret": "do-not-print"}, "data": {"secret": "no"}}
+            yield Session()
+
+        original_open = xhs.open_mcp_session
+        xhs.open_mcp_session = fake_open
+        try:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                await xhs._run_login(SimpleNamespace(profile="codex", rate_limit="12", server_command="fake"))
+        finally:
+            xhs.open_mcp_session = original_open
+        self.assertEqual(json.loads(output.getvalue()), {"ok": False, "error_code": "not_logged_in"})
 
 
 if __name__ == "__main__":

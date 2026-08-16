@@ -59,8 +59,8 @@ def item_arguments(mode, item):
         if not isinstance(xsec_token, str):
             raise ValueError("xsec_token must be a string")
         max_comments = _integer(item.get("max_comments", 10), "max_comments")
-        if max_comments < 1:
-            raise ValueError("max_comments must be at least 1")
+        if max_comments < 0:
+            raise ValueError("max_comments must not be negative")
         return {
             "note_id": note_id,
             "xsec_token": xsec_token,
@@ -147,14 +147,14 @@ async def execute_batch(items, mode, call_tool, output_dir, delay_seconds, sleep
     output_dir = Path(output_dir)
     summary = {
         "total": len(validated), "attempted": 0, "succeeded": 0,
-        "timed_out": 0, "other_failures": 0, "stop_reason": None,
+        "timed_out": 0, "other_failures": 0, "stopped_on": None,
     }
     tool_name = TOOL_NAMES[mode]
     for index, (key, arguments) in enumerate(validated):
         try:
             envelope = parse_envelope(await call_tool(tool_name, arguments))
-        except Exception as exc:  # Persist operational failures as a batch result.
-            envelope = _failure_envelope("tool_call_failed", str(exc))
+        except Exception:  # Persist operational failures without leaking process details.
+            envelope = _failure_envelope("tool_call_failed", "tool call failed")
         record = {"key": key, "tool": tool_name, "arguments": arguments, "envelope": envelope}
         _write_json_atomically(output_dir / f"{key}.json", record)
         summary["attempted"] += 1
@@ -167,7 +167,7 @@ async def execute_batch(items, mode, call_tool, output_dir, delay_seconds, sleep
             else:
                 summary["other_failures"] += 1
             if code in RISK_CODES:
-                summary["stop_reason"] = code
+                summary["stopped_on"] = code
                 break
         if index < len(validated) - 1:
             await sleeper(delay_seconds)
@@ -176,7 +176,7 @@ async def execute_batch(items, mode, call_tool, output_dir, delay_seconds, sleep
 
 
 @asynccontextmanager
-async def mcp_session(command, env):
+async def open_mcp_session(command, env):
     """Open one initialized stdio MCP session; imports stay lazy for testability."""
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
@@ -201,7 +201,7 @@ def _load_manifest(path, expected_mode):
 
 async def _run_list_tools(args):
     env = build_server_env(args.profile, True, args.rate_limit)
-    async with mcp_session(args.server_command, env) as session:
+    async with open_mcp_session(args.server_command, env) as session:
         result = await session.list_tools()
         tools = result.get("tools", []) if isinstance(result, Mapping) else getattr(result, "tools", [])
         names = [tool.get("name") if isinstance(tool, Mapping) else getattr(tool, "name", None) for tool in tools]
@@ -210,15 +210,16 @@ async def _run_list_tools(args):
 
 async def _run_login(args):
     env = build_server_env(args.profile, False, args.rate_limit)
-    async with mcp_session(args.server_command, env) as session:
+    async with open_mcp_session(args.server_command, env) as session:
         result = await session.call_tool("login_xiaohongshu", {})
-    print(json.dumps(parse_envelope(result), ensure_ascii=False))
+    envelope = parse_envelope(result)
+    print(json.dumps({"ok": envelope["ok"], "error_code": _error_code(envelope)}, ensure_ascii=False))
 
 
 async def _run_batch(args, mode):
     items = _load_manifest(args.manifest, mode)  # Validate before opening MCP.
     env = build_server_env(args.profile, True, args.rate_limit)
-    async with mcp_session(args.server_command, env) as session:
+    async with open_mcp_session(args.server_command, env) as session:
         async def call_tool(name, arguments):
             return await session.call_tool(name, arguments)
         return await execute_batch(items, mode, call_tool, args.output_dir, args.delay)
