@@ -1,13 +1,15 @@
 import asyncio
-from contextlib import asynccontextmanager, redirect_stdout
+from contextlib import asynccontextmanager, redirect_stderr, redirect_stdout
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 from types import SimpleNamespace
 from types import ModuleType
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -233,8 +235,11 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse((output_dir / "second.json").exists())
 
     async def test_tool_exceptions_are_recorded_as_other_failures(self):
+        calls = []
+
         async def call_tool(name, arguments):
-            raise RuntimeError("connection lost")
+            calls.append(arguments["note_id"])
+            raise RuntimeError("connection lost with token=secret")
 
         with tempfile.TemporaryDirectory() as directory:
             summary = await xhs.execute_batch(
@@ -244,6 +249,26 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(record["envelope"]["ok"])
             self.assertEqual(record["envelope"]["error"], {"code": "tool_call_failed", "message": "tool call failed"})
             self.assertEqual(summary["other_failures"], 1)
+            self.assertEqual(summary["stopped_on"], "tool_call_failed")
+        self.assertEqual(calls, ["1"])
+
+    async def test_invalid_envelope_stops_without_calling_remaining_items(self):
+        calls = []
+
+        async def call_tool(name, arguments):
+            calls.append(arguments["query"])
+            return "not JSON"
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            summary = await xhs.execute_batch(
+                [{"key": "first", "query": "a"}, {"key": "second", "query": "b"}],
+                "search", call_tool, output_dir, 0,
+            )
+            record = json.loads((output_dir / "first.json").read_text(encoding="utf-8"))
+        self.assertEqual(calls, ["a"])
+        self.assertEqual(summary["stopped_on"], "invalid_envelope")
+        self.assertEqual(record["envelope"]["error"], {"code": "invalid_envelope", "message": "invalid tool envelope"})
 
     async def test_detail_output_uses_detail_tool_and_contract_shape(self):
         async def call_tool(name, arguments):
@@ -390,6 +415,174 @@ class CliTests(unittest.IsolatedAsyncioTestCase):
         finally:
             xhs.open_mcp_session = original_open
         self.assertEqual(json.loads(output.getvalue()), {"ok": False, "error_code": "not_logged_in"})
+
+    def test_cli_rejects_nonfinite_or_below_minimum_timings_before_runtime(self):
+        parser = xhs._parser()
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "manifest.json"
+            manifest.write_text(json.dumps({"mode": "search", "items": []}), encoding="utf-8")
+            base = ["search-batch", str(manifest), "--output-dir", str(Path(directory) / "out"), "--profile", "codex"]
+            for option in ("--delay", "--rate-limit"):
+                for value in ("0", "-1", "nan", "inf", "not-a-number"):
+                    with self.subTest(option=option, value=value):
+                        with redirect_stderr(io.StringIO()):
+                            with self.assertRaises(SystemExit):
+                                parser.parse_args(base + [option, value])
+            detail = ["detail-batch", str(manifest), "--output-dir", str(Path(directory) / "detail-out"), "--profile", "codex"]
+            for option in ("--delay", "--rate-limit"):
+                with self.subTest(option=option, detail=True):
+                    with redirect_stderr(io.StringIO()):
+                        with self.assertRaises(SystemExit):
+                            parser.parse_args(detail + [option, "12"])
+
+    async def test_batch_prints_only_allowlisted_summary_fields(self):
+        @asynccontextmanager
+        async def fake_open(command, env):
+            class Session:
+                async def call_tool(self, name, arguments):
+                    return {"ok": False, "error": {"code": "search_blocked", "secret": "no"}}
+            yield Session()
+
+        original_open = xhs.open_mcp_session
+        xhs.open_mcp_session = fake_open
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                manifest = Path(directory) / "manifest.json"
+                output_dir = Path(directory) / "out"
+                manifest.write_text(json.dumps({"mode": "search", "items": [{"key": "q", "query": "a"}]}), encoding="utf-8")
+                args = SimpleNamespace(manifest=str(manifest), output_dir=str(output_dir), profile="codex", rate_limit="12", server_command="fake", delay=12)
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    await xhs._run_batch(args, "search")
+        finally:
+            xhs.open_mcp_session = original_open
+        self.assertEqual(
+            json.loads(output.getvalue()),
+            {"total": 1, "attempted": 1, "succeeded": 0, "timed_out": 0, "other_failures": 1, "stopped_on": "search_blocked"},
+        )
+
+
+class OutputSafetyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rejects_duplicate_casefold_and_reserved_keys_before_calling_tool(self):
+        cases = [
+            [{"key": "same", "query": "a"}, {"key": "same", "query": "b"}],
+            [{"key": "Case", "query": "a"}, {"key": "case", "query": "b"}],
+            [{"key": "run_summary", "query": "a"}],
+        ]
+        for items in cases:
+            with self.subTest(items=items):
+                calls = []
+
+                async def call_tool(*args):
+                    calls.append(args)
+
+                with tempfile.TemporaryDirectory() as directory:
+                    with self.assertRaises(ValueError):
+                        await xhs.execute_batch(items, "search", call_tool, Path(directory) / "out", 0)
+                self.assertEqual(calls, [])
+
+    async def test_rejects_file_or_nonempty_output_directory_before_calling_tool(self):
+        for is_file in (True, False):
+            with self.subTest(is_file=is_file):
+                calls = []
+
+                async def call_tool(*args):
+                    calls.append(args)
+
+                with tempfile.TemporaryDirectory() as directory:
+                    output_dir = Path(directory) / "out"
+                    if is_file:
+                        output_dir.write_text("not a directory", encoding="utf-8")
+                    else:
+                        output_dir.mkdir()
+                        (output_dir / "existing.json").write_text("{}", encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        await xhs.execute_batch([{"key": "q", "query": "a"}], "search", call_tool, output_dir, 0)
+                self.assertEqual(calls, [])
+
+    async def test_batch_cli_preflights_output_before_opening_session(self):
+        opened = False
+
+        def unexpected_session(*args, **kwargs):
+            nonlocal opened
+            opened = True
+            raise AssertionError("session must not open for unsafe output")
+
+        original_open = xhs.open_mcp_session
+        xhs.open_mcp_session = unexpected_session
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                manifest = root / "manifest.json"
+                output_dir = root / "out"
+                manifest.write_text(json.dumps({"mode": "search", "items": [{"key": "q", "query": "a"}]}), encoding="utf-8")
+                output_dir.mkdir()
+                (output_dir / "existing.json").write_text("{}", encoding="utf-8")
+                args = SimpleNamespace(manifest=str(manifest), output_dir=str(output_dir), profile="codex", rate_limit="12", server_command="fake", delay=12)
+                with self.assertRaises(ValueError):
+                    await xhs._run_batch(args, "search")
+        finally:
+            xhs.open_mcp_session = original_open
+        self.assertFalse(opened)
+
+    async def test_atomic_writer_overwrites_without_temp_residue_and_cleans_up_after_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "record.json"
+            xhs._write_json_atomically(target, {"version": 1})
+            xhs._write_json_atomically(target, {"version": 2})
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"version": 2})
+            self.assertFalse(list(Path(directory).glob(".*.tmp")))
+            with patch.object(xhs.os, "replace", side_effect=OSError("replace failed")):
+                with self.assertRaises(OSError):
+                    xhs._write_json_atomically(target, {"version": 3})
+            self.assertEqual([path.name for path in Path(directory).iterdir()], ["record.json"])
+
+
+class BootstrapTests(unittest.TestCase):
+    def test_bootstrap_reexecs_with_server_shebang_interpreter_when_mcp_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            server = Path(directory) / "stride28-search-mcp"
+            server.write_text(f"#!{sys.executable}\n", encoding="utf-8")
+            executed = []
+            with patch.object(xhs.importlib.util, "find_spec", return_value=None), patch.object(xhs.shutil, "which", return_value=str(server)), patch.object(xhs.os, "execv", side_effect=lambda *args: executed.append(args)):
+                self.assertTrue(xhs._bootstrap_mcp_runtime("stride28-search-mcp", ["list-tools", "--profile", "codex"]))
+        self.assertEqual(executed, [(sys.executable, [sys.executable, str(MODULE_PATH.resolve()), "list-tools", "--profile", "codex"])])
+
+    def test_bootstrap_rejects_missing_or_unsafe_server_interpreter_without_path_leakage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            unsafe = Path(directory) / "unsafe"
+            unsafe.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            for command, located in (("missing", None), ("unsafe", str(unsafe))):
+                with self.subTest(command=command), patch.object(xhs.importlib.util, "find_spec", return_value=None), patch.object(xhs.shutil, "which", return_value=located):
+                    with self.assertRaises(RuntimeError) as caught:
+                        xhs._bootstrap_mcp_runtime(command, ["list-tools", "--profile", "codex"])
+                self.assertNotIn(directory, str(caught.exception))
+
+    def test_bootstrap_does_not_reexec_when_mcp_is_already_available(self):
+        with patch.object(xhs.importlib.util, "find_spec", return_value=object()), patch.object(xhs.os, "execv") as execv:
+            self.assertFalse(xhs._bootstrap_mcp_runtime("stride28-search-mcp", ["list-tools", "--profile", "codex"]))
+        execv.assert_not_called()
+
+    def test_main_redacts_bootstrap_errors(self):
+        with patch.object(xhs, "_bootstrap_mcp_runtime", side_effect=RuntimeError("/private/profile/path")):
+            with self.assertRaises(SystemExit) as caught:
+                xhs.main(["list-tools", "--profile", "codex"])
+        self.assertEqual(str(caught.exception), "MCP runtime is unavailable")
+
+
+@unittest.skipUnless(os.environ.get("RUN_STRIDE28_MCP_SMOKE") == "1", "set RUN_STRIDE28_MCP_SMOKE=1 to run real MCP smoke")
+class Stride28SmokeTests(unittest.TestCase):
+    def test_ordinary_python_list_tools_returns_json_names(self):
+        import subprocess
+
+        completed = subprocess.run(
+            [sys.executable, str(MODULE_PATH), "list-tools", "--profile", "codex"],
+            text=True, capture_output=True, timeout=60, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        names = json.loads(completed.stdout)
+        self.assertTrue(names)
+        self.assertTrue(all(isinstance(name, str) for name in names))
 
 
 if __name__ == "__main__":

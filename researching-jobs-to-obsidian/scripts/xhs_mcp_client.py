@@ -3,16 +3,22 @@
 import argparse
 import asyncio
 from contextlib import asynccontextmanager
+import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
+import shutil
+import sys
+import tempfile
 from collections.abc import Mapping
 
 
 RISK_CODES = {"captcha_detected", "search_blocked", "risk_cooldown_active"}
 KEY_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 TOOL_NAMES = {"search": "search_xiaohongshu", "detail": "get_note_detail"}
+SUMMARY_FIELDS = ("total", "attempted", "succeeded", "timed_out", "other_failures", "stopped_on")
 
 
 def build_server_env(profile, headless, rate_limit, base_env=None):
@@ -118,9 +124,23 @@ def _failure_envelope(code, message):
 
 def _write_json_atomically(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    descriptor = None
+    temporary = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = None
+            handle.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary is not None and os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def _validated_items(items, mode):
@@ -129,14 +149,36 @@ def _validated_items(items, mode):
     if not isinstance(items, list):
         raise ValueError("manifest items must be a list")
     validated = []
+    seen_keys = set()
     for item in items:
         if not isinstance(item, Mapping):
             raise ValueError("each manifest item must be an object")
         key = item.get("key")
         if not isinstance(key, str) or not KEY_PATTERN.fullmatch(key):
             raise ValueError("item key must match ^[A-Za-z0-9._-]+$")
+        folded_key = key.casefold()
+        if folded_key == "run_summary":
+            raise ValueError("item key is reserved")
+        if folded_key in seen_keys:
+            raise ValueError("item keys must be unique without case collisions")
+        seen_keys.add(folded_key)
         validated.append((key, item_arguments(mode, item)))
     return validated
+
+
+def _prepare_output_dir(output_dir):
+    path = Path(output_dir)
+    try:
+        if path.exists() or path.is_symlink():
+            if path.is_symlink() or not path.is_dir():
+                raise ValueError("output directory must be a directory")
+            if any(path.iterdir()):
+                raise ValueError("output directory must be new or empty")
+        else:
+            path.mkdir(parents=True)
+    except OSError as exc:
+        raise ValueError("output directory is unavailable") from exc
+    return path
 
 
 async def execute_batch(items, mode, call_tool, output_dir, delay_seconds, sleeper=asyncio.sleep):
@@ -144,7 +186,7 @@ async def execute_batch(items, mode, call_tool, output_dir, delay_seconds, sleep
     validated = _validated_items(items, mode)
     if delay_seconds < 0:
         raise ValueError("delay_seconds must not be negative")
-    output_dir = Path(output_dir)
+    output_dir = _prepare_output_dir(output_dir)
     summary = {
         "total": len(validated), "attempted": 0, "succeeded": 0,
         "timed_out": 0, "other_failures": 0, "stopped_on": None,
@@ -152,9 +194,18 @@ async def execute_batch(items, mode, call_tool, output_dir, delay_seconds, sleep
     tool_name = TOOL_NAMES[mode]
     for index, (key, arguments) in enumerate(validated):
         try:
-            envelope = parse_envelope(await call_tool(tool_name, arguments))
+            result = await call_tool(tool_name, arguments)
         except Exception:  # Persist operational failures without leaking process details.
             envelope = _failure_envelope("tool_call_failed", "tool call failed")
+            terminal_failure = True
+        else:
+            try:
+                envelope = parse_envelope(result)
+            except ValueError:
+                envelope = _failure_envelope("invalid_envelope", "invalid tool envelope")
+                terminal_failure = True
+            else:
+                terminal_failure = False
         record = {"key": key, "tool": tool_name, "arguments": arguments, "envelope": envelope}
         _write_json_atomically(output_dir / f"{key}.json", record)
         summary["attempted"] += 1
@@ -166,7 +217,7 @@ async def execute_batch(items, mode, call_tool, output_dir, delay_seconds, sleep
                 summary["timed_out"] += 1
             else:
                 summary["other_failures"] += 1
-            if code in RISK_CODES:
+            if terminal_failure or code in RISK_CODES:
                 summary["stopped_on"] = code
                 break
         if index < len(validated) - 1:
@@ -218,11 +269,35 @@ async def _run_login(args):
 
 async def _run_batch(args, mode):
     items = _load_manifest(args.manifest, mode)  # Validate before opening MCP.
+    output_dir = _prepare_output_dir(args.output_dir)
     env = build_server_env(args.profile, True, args.rate_limit)
     async with open_mcp_session(args.server_command, env) as session:
         async def call_tool(name, arguments):
             return await session.call_tool(name, arguments)
-        return await execute_batch(items, mode, call_tool, args.output_dir, args.delay)
+        summary = await execute_batch(items, mode, call_tool, output_dir, args.delay)
+    print(json.dumps({field: summary[field] for field in SUMMARY_FIELDS}, ensure_ascii=False))
+    return summary
+
+
+def _finite_float(minimum):
+    def parse(value):
+        try:
+            number = float(value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError("must be a finite number") from exc
+        if not math.isfinite(number) or number < minimum:
+            raise argparse.ArgumentTypeError(f"must be a finite number >= {minimum}")
+        return number
+    return parse
+
+
+def _finite_rate_limit(minimum):
+    validate = _finite_float(minimum)
+
+    def parse(value):
+        validate(value)
+        return value
+    return parse
 
 
 def _parser():
@@ -232,14 +307,14 @@ def _parser():
     for name in ("list-tools", "login"):
         subparser = subparsers.add_parser(name)
         subparser.add_argument("--profile", required=True)
-        subparser.add_argument("--rate-limit", default="12")
+        subparser.add_argument("--rate-limit", type=_finite_rate_limit(12), default="12")
     for name, delay, rate_limit in (("search-batch", 12, 12), ("detail-batch", 20, 20)):
         subparser = subparsers.add_parser(name)
         subparser.add_argument("manifest")
         subparser.add_argument("--output-dir", required=True)
         subparser.add_argument("--profile", required=True)
-        subparser.add_argument("--delay", type=float, default=delay)
-        subparser.add_argument("--rate-limit", default=str(rate_limit))
+        subparser.add_argument("--delay", type=_finite_float(delay), default=delay)
+        subparser.add_argument("--rate-limit", type=_finite_rate_limit(rate_limit), default=str(rate_limit))
     return parser
 
 
@@ -254,8 +329,50 @@ async def _main_async(args):
         await _run_batch(args, "detail")
 
 
+def _server_python_interpreter(server_command):
+    executable = shutil.which(server_command)
+    if executable is None:
+        raise RuntimeError("MCP runtime is unavailable")
+    try:
+        first_line = Path(executable).read_bytes().splitlines()[0]
+    except (OSError, IndexError):
+        raise RuntimeError("MCP runtime is unavailable") from None
+    if not first_line.startswith(b"#!"):
+        raise RuntimeError("MCP runtime is unavailable")
+    try:
+        parts = first_line[2:].strip().decode("utf-8").split()
+    except UnicodeDecodeError:
+        raise RuntimeError("MCP runtime is unavailable") from None
+    if len(parts) != 1:
+        raise RuntimeError("MCP runtime is unavailable")
+    interpreter = Path(parts[0])
+    if (
+        not interpreter.is_absolute()
+        or not interpreter.is_file()
+        or not os.access(interpreter, os.X_OK)
+        or "python" not in interpreter.name.lower()
+    ):
+        raise RuntimeError("MCP runtime is unavailable")
+    return str(interpreter)
+
+
+def _bootstrap_mcp_runtime(server_command, argv):
+    """Re-exec the CLI using the server's isolated Python when MCP is absent."""
+    if importlib.util.find_spec("mcp") is not None:
+        return False
+    interpreter = _server_python_interpreter(server_command)
+    os.execv(interpreter, [interpreter, str(Path(__file__).resolve()), *argv])
+    return True
+
+
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
     args = _parser().parse_args(argv)
+    try:
+        if _bootstrap_mcp_runtime(args.server_command, argv):
+            return
+    except RuntimeError:
+        raise SystemExit("MCP runtime is unavailable") from None
     asyncio.run(_main_async(args))
 
 
