@@ -47,6 +47,14 @@ class ValidateTextTests(unittest.TestCase):
         text = valid_brief() + "\n\n## 附录\n补充方法说明。"
         self.assertEqual(validator.validate_text(text), [])
 
+    def test_allows_required_headings_with_up_to_three_leading_spaces(self):
+        text = valid_brief().replace("\n## ", "\n   ## ")
+        self.assertEqual(validator.validate_text(text), [])
+
+    def test_does_not_treat_four_space_indented_heading_as_required_heading(self):
+        text = valid_brief().replace("\n## 薪资待遇\n", "\n    ## 薪资待遇\n")
+        self.assertIn("document: missing heading: 薪资待遇", validator.validate_text(text))
+
     def test_rejects_empty_or_unterminated_frontmatter(self):
         for text, expected in (
             (valid_brief().replace("title: 岗位调研\ntags:\n  - 求职", "", 1), "frontmatter"),
@@ -96,6 +104,12 @@ class ValidateTextTests(unittest.TestCase):
         text = valid_brief().replace("\n[^", "\n   [^")
         self.assertEqual(validator.validate_text(text), [])
 
+    def test_handles_thousands_of_unique_used_footnotes(self):
+        count = 2_000
+        definitions = "\n".join(f"[^bulk-{index}]: https://example.net/{index}" for index in range(count))
+        references = " ".join(f"[^bulk-{index}]" for index in range(count))
+        self.assertEqual(validator.validate_text(valid_brief() + f"\n{definitions}\n{references}"), [])
+
     def test_rejects_duplicate_source_id_and_normalized_url(self):
         text = valid_brief() + "\n[^c]: https://EXAMPLE.com/a#other\n引用[^c]"
         errors = validator.validate_text(text)
@@ -113,6 +127,18 @@ class ValidateTextTests(unittest.TestCase):
             with self.subTest(target=target):
                 errors = validator.validate_text(valid_brief() + f"\n[local]({target})")
                 self.assertTrue(any("absolute local Markdown link" in error for error in errors))
+
+    def test_ignores_inline_code_and_escaped_footnotes_and_links(self):
+        text = valid_brief() + (
+            "\n`[^inline]` \\[^escaped] `[inline](/Users/name/note.md)` "
+            "\\[escaped](/Users/name/note.md)"
+        )
+        self.assertEqual(validator.validate_text(text), [])
+
+    def test_still_detects_real_footnotes_and_links_after_masking(self):
+        errors = validator.validate_text(valid_brief() + "\n[^real] [real](/Users/name/note.md)")
+        self.assertIn("sources: used reference without definition: real", errors)
+        self.assertIn("document: absolute local Markdown link", errors)
 
     def test_requires_salary_limitation_language(self):
         text = valid_brief().replace(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 import re
 import sys
@@ -129,17 +130,53 @@ def _normalize_url(url: str) -> str | None:
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, parts.query, ""))
 
 
+def _matches_required_heading(line: str, heading: str) -> bool:
+    leading_spaces = len(line) - len(line.lstrip(" "))
+    return leading_spaces <= 3 and line[leading_spaces:].rstrip() == f"## {heading}"
+
+
+def _is_level_two_heading(line: str) -> bool:
+    leading_spaces = len(line) - len(line.lstrip(" "))
+    return leading_spaces <= 3 and line[leading_spaces:].startswith("## ")
+
+
 def _section_text(lines: list[tuple[int, str]], heading: str) -> str:
-    needle = f"## {heading}"
     for index, (_, line) in enumerate(lines):
-        if line.rstrip() == needle:
+        if _matches_required_heading(line, heading):
             following: list[str] = []
             for _, candidate in lines[index + 1:]:
-                if candidate.startswith("## "):
+                if _is_level_two_heading(candidate):
                     break
                 following.append(candidate)
             return "\n".join(following)
     return ""
+
+
+def _mask_inline_code_and_escaped_syntax(text: str) -> str:
+    """Mask syntax that Markdown renders literally before scanning references and links."""
+    masked = list(text)
+    index = 0
+    while index < len(text):
+        if text[index] == "\\" and index + 1 < len(text) and text[index + 1] in "[]()`\\":
+            masked[index] = "\0"
+            masked[index + 1] = "\0"
+            index += 2
+            continue
+        if text[index] != "`":
+            index += 1
+            continue
+        length = 1
+        while index + length < len(text) and text[index + length] == "`":
+            length += 1
+        delimiter = "`" * length
+        closing = text.find(delimiter, index + length)
+        if closing == -1:
+            index += length
+            continue
+        for cursor in range(index, closing + length):
+            masked[cursor] = "\0"
+        index = closing + length
+    return "".join(masked)
 
 
 def _has_salary_limitation(text: str) -> bool:
@@ -176,11 +213,12 @@ def validate_text(text: str) -> list[str]:
     entry_errors: list[str] = []
     content = _content_lines(lines, content_start)
     content_text = "\n".join(line for _, line in content)
+    scannable_text = _mask_inline_code_and_escaped_syntax(content_text)
 
     positions: dict[str, list[int]] = {heading: [] for heading in REQUIRED_HEADINGS}
     for position, (_, line) in enumerate(content):
         for heading in REQUIRED_HEADINGS:
-            if line.rstrip() == f"## {heading}":
+            if _matches_required_heading(line, heading):
                 positions[heading].append(position)
     for heading in REQUIRED_HEADINGS:
         if not positions[heading]:
@@ -194,7 +232,7 @@ def validate_text(text: str) -> list[str]:
         document_errors.append("document: implementation marker")
     if any(_CONFLICT_MARKER.match(line) for _, line in content):
         document_errors.append("document: merge conflict marker")
-    for match in _MARKDOWN_LINK.finditer(content_text):
+    for match in _MARKDOWN_LINK.finditer(scannable_text):
         target = (match.group(1) or match.group(2)).strip()
         lowered = target.lower()
         if target.startswith(("/Users/", "/home/")) or lowered.startswith("file://") or re.match(r"^[a-zA-Z]:[\\/]", target):
@@ -203,7 +241,9 @@ def validate_text(text: str) -> list[str]:
     definitions, definition_errors = _definitions(lines, content_start)
     source_errors.extend(definition_errors)
     definition_ids = [identifier for identifier, _ in definitions]
-    for identifier in sorted({item for item in definition_ids if definition_ids.count(item) > 1}):
+    for identifier, count in sorted(Counter(definition_ids).items()):
+        if count <= 1:
+            continue
         source_errors.append(f"sources: duplicate definition ID: {identifier}")
     normalized_urls: list[str] = []
     for identifier, url in definitions:
@@ -212,12 +252,14 @@ def validate_text(text: str) -> list[str]:
             source_errors.append(f"sources: invalid HTTPS URL: {identifier}")
         else:
             normalized_urls.append(normalized)
-    for url in sorted({item for item in normalized_urls if normalized_urls.count(item) > 1}):
+    for url, count in sorted(Counter(normalized_urls).items()):
+        if count <= 1:
+            continue
         source_errors.append(f"sources: duplicate normalized URL: {url}")
     if not definitions:
         source_errors.append("sources: no HTTPS source definitions")
 
-    used_ids = [match.group(1) for match in _FOOTNOTE_REF.finditer(content_text)]
+    used_ids = [match.group(1) for match in _FOOTNOTE_REF.finditer(scannable_text)]
     defined_set = set(definition_ids)
     used_set = set(used_ids)
     for identifier in sorted(used_set - defined_set):
