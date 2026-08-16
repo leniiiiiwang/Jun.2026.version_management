@@ -18,12 +18,13 @@ sys.modules[SPEC.name] = downloader
 SPEC.loader.exec_module(downloader)
 
 
-def detail(note_id, urls, *, ok=True, data_key="id"):
-    data = {data_key: note_id, "image_urls": urls}
+def detail(key, urls=None, *, ok=True, data_id="default", tool="get_note_detail", data=None):
+    if data is None:
+        data = None if not ok else {"id": key if data_id == "default" else data_id, "image_urls": urls}
     return {
-        "key": f"detail-{note_id}",
-        "tool": "get_note_detail",
-        "arguments": {"note_id": note_id},
+        "key": key,
+        "tool": tool,
+        "arguments": {"note_id": key},
         "envelope": {"ok": ok, "data": data},
     }
 
@@ -41,7 +42,7 @@ class CollectJobsTests(unittest.TestCase):
                 "https://cdn.test/b.png",
             ]))
             write_detail(directory, "two.json", detail("two", ["https://cdn.test/two.jpg"]))
-            write_detail(directory, "bad.json", detail("one", ["https://cdn.test/bad.jpg"], ok=False))
+            write_detail(directory, "timeout.json", detail("timeout", ok=False))
             (directory / "run_summary.json").write_text("{not JSON", encoding="utf-8")
 
             self.assertEqual(
@@ -52,17 +53,46 @@ class CollectJobsTests(unittest.TestCase):
                 ],
             )
 
-    def test_accepts_allowlisted_data_key_and_rejects_unsafe_note_id(self):
+    def test_uses_record_key_when_data_id_is_absent_and_never_uses_data_key(self):
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
-            write_detail(directory, "key.json", detail("safe-key", ["https://cdn.test/a"], data_key="key"))
+            write_detail(directory, "safe-key.json", detail(
+                "safe-key", data={"key": "not-allowlisted", "image_urls": ["https://cdn.test/a"]},
+            ))
             self.assertEqual(
                 downloader.collect_jobs(directory, {"safe-key"}),
                 [{"note_id": "safe-key", "source_url": "https://cdn.test/a"}],
             )
-            write_detail(directory, "unsafe.json", detail("../unsafe", ["https://cdn.test/a"]))
-            with self.assertRaises(ValueError):
-                downloader.collect_jobs(directory, {"safe-key", "../unsafe"})
+
+    def test_rejects_mismatched_unsafe_reserved_and_non_detail_records(self):
+        cases = [
+            ("wrong-stem.json", detail("right", ["https://cdn.test/a"])),
+            ("unsafe stem.json", detail("unsafe stem", ok=False)),
+            ("download_manifest.json", detail("download_manifest", ok=False)),
+            ("tool.json", detail("tool", ["https://cdn.test/a"], tool="search_xiaohongshu")),
+            ("conflict.json", detail("conflict", ["https://cdn.test/a"], data_id="other")),
+        ]
+        for filename, record in cases:
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as raw:
+                directory = Path(raw)
+                write_detail(directory, filename, record)
+                with self.assertRaises(ValueError):
+                    downloader.collect_jobs(directory, {"right", "tool", "conflict"})
+
+    def test_skips_realistic_timeout_before_touching_images(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            write_detail(directory, "one.json", detail("one", ["https://cdn.test/a.jpg"]))
+            timeout = detail("timeout", ok=False)
+            timeout["envelope"] = {"ok": False, "data": None, "error": {"code": "search_timeout"}}
+            write_detail(directory, "timeout.json", timeout)
+            write_detail(directory, "unselected.json", detail(
+                "unselected", data={"id": "unselected", "image_urls": {"not": "a list"}},
+            ))
+            self.assertEqual(
+                downloader.collect_jobs(directory, {"one", "timeout"}),
+                [{"note_id": "one", "source_url": "https://cdn.test/a.jpg"}],
+            )
 
     def test_rejects_malformed_detail_json_with_filename_only(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -193,18 +223,92 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
                     downloader._write_bytes_atomically(target, b"image")
             self.assertFalse(list(Path(raw).glob(".*.tmp")))
 
+    async def test_rejects_casefold_colliding_note_ids_before_dynamic_extension_fetches(self):
+        calls = []
+
+        async def fetcher(url):
+            calls.append(url)
+            return b"image", "image/png"
+
+        jobs = [
+            {"note_id": "A", "source_url": "https://cdn.test/no-extension-one"},
+            {"note_id": "a", "source_url": "https://cdn.test/no-extension-two"},
+        ]
+        with tempfile.TemporaryDirectory() as raw:
+            with self.assertRaises(ValueError):
+                await downloader.download_jobs(jobs, Path(raw) / "images", 0, fetcher)
+        self.assertEqual(calls, [])
+
+    async def test_does_not_overwrite_a_final_dynamic_extension_collision(self):
+        with tempfile.TemporaryDirectory() as raw:
+            output = Path(raw) / "images"
+
+            async def fetcher(url):
+                output.mkdir(exist_ok=True)
+                (output / "one-01.png").write_bytes(b"foreign")
+                return b"image", "image/png"
+
+            summary = await downloader.download_jobs(
+                [{"note_id": "one", "source_url": "https://cdn.test/no-extension"}], output, 0, fetcher,
+            )
+            self.assertEqual((output / "one-01.png").read_bytes(), b"foreign")
+            self.assertEqual(summary["failed"], 1)
+            self.assertEqual(summary["records"][0]["output_file"], None)
+
+    async def test_preflight_reserves_download_manifest_note_id_before_fetch(self):
+        calls = []
+
+        async def fetcher(url):
+            calls.append(url)
+            return b"image", "image/jpeg"
+
+        with tempfile.TemporaryDirectory() as raw:
+            with self.assertRaises(ValueError):
+                await downloader.download_jobs(
+                    [{"note_id": "download_manifest", "source_url": "https://cdn.test/image"}],
+                    Path(raw) / "images", 0, fetcher,
+                )
+        self.assertEqual(calls, [])
+
 
 class CliTests(unittest.TestCase):
     def test_selected_id_file_rejects_duplicates_case_collisions_and_unsafe_ids(self):
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "ids.txt"
-            for content in ("one\\none\\n", "one\\nONE\\n", "../one\\n"):
+            for content in ("one\\none\\n", "one\\nONE\\n", "../one\\n", "download_manifest\\n"):
                 path.write_text(content, encoding="utf-8")
                 with self.subTest(content=content):
                     with self.assertRaises(ValueError):
                         downloader.load_selected_ids(path)
 
-    def test_cli_rejects_non_positive_and_nonfinite_delay_before_fetch(self):
+    def test_cli_defaults_and_accepts_two_second_delay(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            details = root / "details"
+            details.mkdir()
+            write_detail(details, "one.json", detail("one", ["https://cdn.test/a.jpg"]))
+            ids = root / "ids.txt"
+            ids.write_text("one\n", encoding="utf-8")
+            calls = []
+
+            async def fetcher(url):
+                calls.append(url)
+                return b"image", "image/jpeg"
+
+            with patch.object(downloader, "default_fetcher", fetcher):
+                default_summary = downloader.main([
+                    "--details-dir", str(details), "--selected-ids", str(ids),
+                    "--output-dir", str(root / "images-default"),
+                ])
+                explicit_summary = downloader.main([
+                    "--details-dir", str(details), "--selected-ids", str(ids),
+                    "--output-dir", str(root / "images-explicit"), "--delay", "2",
+                ])
+            self.assertEqual(calls, ["https://cdn.test/a.jpg", "https://cdn.test/a.jpg"])
+            self.assertEqual(default_summary["succeeded"], 1)
+            self.assertEqual(explicit_summary["succeeded"], 1)
+
+    def test_cli_rejects_invalid_delay_before_fetch(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             details = root / "details"
@@ -212,7 +316,7 @@ class CliTests(unittest.TestCase):
             write_detail(details, "one.json", detail("one", ["https://cdn.test/a.jpg"]))
             ids = root / "ids.txt"
             ids.write_text("one\\n", encoding="utf-8")
-            for delay in ("0", "-1", "nan", "inf"):
+            for delay in ("1", "0", "-1", "nan", "inf", "not-a-number"):
                 with self.subTest(delay=delay), patch.object(downloader, "default_fetcher", side_effect=AssertionError("no fetch")):
                     with self.assertRaises(ValueError):
                         downloader.main([

@@ -22,10 +22,16 @@ CONTENT_TYPE_EXTENSIONS = {
     "image/webp": ".webp",
     "image/gif": ".gif",
 }
+RESERVED_IDS = {"run_summary", "download_manifest"}
 
 
 def _safe_note_id(value):
-    if not isinstance(value, str) or not NOTE_ID_PATTERN.fullmatch(value) or value in {".", ".."}:
+    if (
+        not isinstance(value, str)
+        or not NOTE_ID_PATTERN.fullmatch(value)
+        or value in {".", ".."}
+        or value.casefold() in RESERVED_IDS
+    ):
         raise ValueError("note ID must be a safe filename component")
     return value
 
@@ -39,14 +45,6 @@ def _safe_http_url(value):
 
 def _detail_error(path):
     return ValueError(f"malformed detail file: {Path(path).name}")
-
-
-def _selected_note_id(data, selected_ids):
-    for name in ("id", "key"):
-        value = data.get(name)
-        if isinstance(value, str) and value in selected_ids:
-            return _safe_note_id(value)
-    return None
 
 
 def collect_jobs(details_dir: Path, selected_ids: set[str]) -> list[dict]:
@@ -69,10 +67,20 @@ def collect_jobs(details_dir: Path, selected_ids: set[str]) -> list[dict]:
         if path.name == "run_summary.json":
             continue
         try:
+            path_key = _safe_note_id(path.stem)
+        except ValueError as exc:
+            raise _detail_error(path) from exc
+        try:
             record = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise _detail_error(path) from exc
         if not isinstance(record, Mapping):
+            raise _detail_error(path)
+        try:
+            record_key = _safe_note_id(record.get("key"))
+        except ValueError as exc:
+            raise _detail_error(path) from exc
+        if record_key != path_key or record.get("tool") != "get_note_detail":
             raise _detail_error(path)
         envelope = record.get("envelope")
         if not isinstance(envelope, Mapping) or type(envelope.get("ok")) is not bool:
@@ -82,8 +90,16 @@ def collect_jobs(details_dir: Path, selected_ids: set[str]) -> list[dict]:
         data = envelope.get("data")
         if not isinstance(data, Mapping):
             raise _detail_error(path)
-        note_id = _selected_note_id(data, selected_ids)
-        if note_id is None:
+        if "id" in data:
+            try:
+                note_id = _safe_note_id(data["id"])
+            except ValueError as exc:
+                raise _detail_error(path) from exc
+            if note_id != record_key:
+                raise _detail_error(path)
+        else:
+            note_id = record_key
+        if note_id not in selected_ids:
             continue
         image_urls = data.get("image_urls")
         if not isinstance(image_urls, list):
@@ -123,7 +139,7 @@ def _prepare_output_dir(output_dir):
     return path
 
 
-def _write_bytes_atomically(path, content):
+def _write_bytes_atomically(path, content, *, no_overwrite=False):
     descriptor = None
     temporary = None
     try:
@@ -133,7 +149,14 @@ def _write_bytes_atomically(path, content):
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        if no_overwrite:
+            if path.exists() or path.is_symlink():
+                raise FileExistsError("output file already exists")
+            os.link(temporary, path)
+            os.unlink(temporary)
+            temporary = None
+        else:
+            os.replace(temporary, path)
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -141,8 +164,10 @@ def _write_bytes_atomically(path, content):
             os.unlink(temporary)
 
 
-def _write_json_atomically(path, value):
-    _write_bytes_atomically(path, (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+def _write_json_atomically(path, value, *, no_overwrite=False):
+    _write_bytes_atomically(
+        path, (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8"), no_overwrite=no_overwrite,
+    )
 
 
 def _extension(source_url, content_type):
@@ -159,10 +184,15 @@ def _validated_jobs(jobs):
     validated = []
     seen_outputs = {"download_manifest.json".casefold()}
     note_counts = {}
+    casefolded_notes = {}
     for job in jobs:
         if not isinstance(job, Mapping):
             raise ValueError("each job must be an object")
         note_id = _safe_note_id(job.get("note_id"))
+        folded_note_id = note_id.casefold()
+        previous_note_id = casefolded_notes.setdefault(folded_note_id, note_id)
+        if previous_note_id != note_id:
+            raise ValueError("job note IDs must not have case collisions")
         source_url = job.get("source_url")
         if not _safe_http_url(source_url):
             raise ValueError("job URL must use http or https")
@@ -204,7 +234,10 @@ async def download_jobs(jobs, output_dir, delay_seconds, fetcher, sleeper=asynci
             if not isinstance(content, bytes):
                 raise TypeError("fetcher returned non-bytes")
             filename = f"{note_id}-{index:02d}{_extension(source_url, content_type)}"
-            _write_bytes_atomically(output_dir / filename, content)
+            target = output_dir / filename
+            if target.exists() or target.is_symlink():
+                raise FileExistsError("output file already exists")
+            _write_bytes_atomically(target, content, no_overwrite=True)
         except Exception:
             summary["failed"] += 1
             summary["records"].append({
@@ -219,7 +252,7 @@ async def download_jobs(jobs, output_dir, delay_seconds, fetcher, sleeper=asynci
             })
         if position < len(validated) - 1:
             await sleeper(delay_seconds)
-    _write_json_atomically(output_dir / "download_manifest.json", summary)
+    _write_json_atomically(output_dir / "download_manifest.json", summary, no_overwrite=True)
     return summary
 
 
@@ -258,7 +291,7 @@ def main(argv=None):
     parser.add_argument("--details-dir", required=True)
     parser.add_argument("--selected-ids", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--delay", required=True)
+    parser.add_argument("--delay", default=2)
     args = parser.parse_args(argv)
     delay = _parse_delay(args.delay)
     selected_ids = load_selected_ids(args.selected_ids)
