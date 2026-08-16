@@ -18,13 +18,13 @@ sys.modules[SPEC.name] = downloader
 SPEC.loader.exec_module(downloader)
 
 
-def detail(key, urls=None, *, ok=True, data_id="default", tool="get_note_detail", data=None):
+def detail(key, urls=None, *, ok=True, data_id="default", note_id="default", tool="get_note_detail", data=None):
     if data is None:
         data = None if not ok else {"id": key if data_id == "default" else data_id, "image_urls": urls}
     return {
         "key": key,
         "tool": tool,
-        "arguments": {"note_id": key},
+        "arguments": {"note_id": key if note_id == "default" else note_id},
         "envelope": {"ok": ok, "data": data},
     }
 
@@ -70,14 +70,44 @@ class CollectJobsTests(unittest.TestCase):
             ("unsafe stem.json", detail("unsafe stem", ok=False)),
             ("download_manifest.json", detail("download_manifest", ok=False)),
             ("tool.json", detail("tool", ["https://cdn.test/a"], tool="search_xiaohongshu")),
-            ("conflict.json", detail("conflict", ["https://cdn.test/a"], data_id="other")),
+            ("bad-args.json", detail("bad-args", ok=False, note_id="../unsafe")),
         ]
         for filename, record in cases:
             with self.subTest(filename=filename), tempfile.TemporaryDirectory() as raw:
                 directory = Path(raw)
                 write_detail(directory, filename, record)
                 with self.assertRaises(ValueError):
-                    downloader.collect_jobs(directory, {"right", "tool", "conflict"})
+                    downloader.collect_jobs(directory, {"right", "tool", "bad-args"})
+
+    def test_supports_distinct_detail_key_and_note_id_selection(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            write_detail(directory, "note-123.json", detail(
+                "note-123", ["https://cdn.test/a.jpg"], note_id="123", data_id="123",
+            ))
+            write_detail(directory, "note-456.json", detail(
+                "note-456", ["https://cdn.test/b.jpg"], note_id="456", data_id="456",
+            ))
+            write_detail(directory, "note-789.json", detail(
+                "note-789", note_id="789", data={"image_urls": ["https://cdn.test/c.jpg"]},
+            ))
+            expected = [{"note_id": "123", "source_url": "https://cdn.test/a.jpg"}]
+            self.assertEqual(downloader.collect_jobs(directory, {"123"}), expected)
+            self.assertEqual(downloader.collect_jobs(directory, {"note-123"}), expected)
+            self.assertEqual(
+                downloader.collect_jobs(directory, {"789"}),
+                [{"note_id": "789", "source_url": "https://cdn.test/c.jpg"}],
+            )
+            self.assertEqual(downloader.collect_jobs(directory, {"unselected"}), [])
+
+    def test_rejects_conflicting_detail_argument_and_envelope_ids(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            write_detail(directory, "note-123.json", detail(
+                "note-123", ["https://cdn.test/a.jpg"], note_id="123", data_id="456",
+            ))
+            with self.assertRaises(ValueError):
+                downloader.collect_jobs(directory, {"123"})
 
     def test_skips_realistic_timeout_before_touching_images(self):
         with tempfile.TemporaryDirectory() as raw:

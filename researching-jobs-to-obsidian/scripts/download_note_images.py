@@ -82,6 +82,13 @@ def collect_jobs(details_dir: Path, selected_ids: set[str]) -> list[dict]:
             raise _detail_error(path) from exc
         if record_key != path_key or record.get("tool") != "get_note_detail":
             raise _detail_error(path)
+        arguments = record.get("arguments")
+        if not isinstance(arguments, Mapping):
+            raise _detail_error(path)
+        try:
+            argument_note_id = _safe_note_id(arguments.get("note_id"))
+        except ValueError as exc:
+            raise _detail_error(path) from exc
         envelope = record.get("envelope")
         if not isinstance(envelope, Mapping) or type(envelope.get("ok")) is not bool:
             raise _detail_error(path)
@@ -95,11 +102,11 @@ def collect_jobs(details_dir: Path, selected_ids: set[str]) -> list[dict]:
                 note_id = _safe_note_id(data["id"])
             except ValueError as exc:
                 raise _detail_error(path) from exc
-            if note_id != record_key:
+            if note_id != argument_note_id:
                 raise _detail_error(path)
         else:
-            note_id = record_key
-        if note_id not in selected_ids:
+            note_id = argument_note_id
+        if note_id not in selected_ids and record_key not in selected_ids:
             continue
         image_urls = data.get("image_urls")
         if not isinstance(image_urls, list):
