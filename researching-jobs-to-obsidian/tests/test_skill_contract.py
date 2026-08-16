@@ -40,7 +40,7 @@ class SkillContractTests(unittest.TestCase):
 
     def test_skill_has_only_three_named_checkpoints_and_uses_references(self):
         text = read(SKILL)
-        checkpoints = re.findall(r"Checkpoint\s+([123])\b", text)
+        checkpoints = re.findall(r"^### Checkpoint\s+([123])\b", text, re.M)
         self.assertEqual(checkpoints, ["1", "2", "3"])
         for phrase in ("scope, budget, and destination", "detail sample", "A/B/C retention", "filename", "same-name"):
             self.assertIn(phrase, text)
@@ -49,6 +49,33 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("before network/login", text)
         self.assertIn("before details", text)
         self.assertIn("before vault write", text)
+
+    def test_core_skill_surfaces_the_operating_contract_when_explaining_or_simulating(self):
+        """Plans must preserve safety controls, rather than hiding them in references."""
+        text = read(SKILL)
+        for phrase in (
+            "When presenting the plan",
+            "simulate or explain",
+            "named persistent profile",
+            "current-login check",
+            "Checkpoint 1 approval",
+            "visible login/manual repair only if needed",
+            "After successful login, search and detail collection are headless",
+            "no visible fallback during a batch",
+            "one MCP/browser session per batch",
+            "12 seconds/180 seconds",
+            "20 seconds/300 seconds",
+            "2 seconds",
+            "search_timeout",
+            "captcha_detected",
+            "search_blocked",
+            "risk_cooldown_active",
+            "exactly three combined checkpoints",
+            "re-read the current file",
+            "manual deletions",
+            "same-name append/new choice",
+        ):
+            self.assertIn(phrase, text)
 
     def test_collection_defaults_and_safety_boundaries_are_documented(self):
         combined = "\n".join(read(path) for path in (SKILL, SETUP, RISK))

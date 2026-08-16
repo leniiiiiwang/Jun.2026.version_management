@@ -11,6 +11,8 @@ Produce a bounded, source-indexed job brief—not a platform-wide exhaustive ans
 
 Use for a company, role, recruiting type, and city scope that can be investigated through Xiaohongshu or Zhihu. Read [setup](references/setup.md) only for installation, login, architecture, or runtime diagnosis. Read [evidence and risk](references/evidence-and-risk.md) for the search matrix, batching, filters, evidence grades, and claim wording.
 
+When presenting the plan, including when asked to simulate or explain it, surface exactly three combined checkpoints. At Checkpoint 1, inspect the named persistent profile and make a current-login check; only after Checkpoint 1 approval, use visible login/manual repair only if needed. After successful login, search and detail collection are headless, with no visible fallback during a batch. State one MCP/browser session per batch; waits of 12 seconds/180 seconds for search, 20 seconds/300 seconds for details, and 2 seconds for images; `search_timeout` continues without retry, while `captcha_detected`, `search_blocked`, and `risk_cooldown_active` are hard stops. At Checkpoint 3, re-read the current file, preserve manual deletions, and obtain the same-name append/new choice.
+
 ### Checkpoint 1 — scope, budget, and destination
 
 Act before network/login: confirm target company/role, approved city and recruiting scope, source platforms, the query/detail budget, the named profile, and destination vault/note folder. Confirm approval for installation, browser/network use, and any write outside the workspace.
@@ -30,5 +32,8 @@ Render [the template](assets/job-research-template.md), validate it, then copy o
 ## Completion checklist
 
 - Three approvals recorded: scope/budget/destination, detail sample, retention/filename.
+- Named persistent profile and current-login check completed; any needed visible login/manual repair followed Checkpoint 1 approval, then collection stayed headless with one MCP/browser session per batch and 12/180, 20/300, and 2-second waits.
+- `search_timeout` was recorded without retry; each hard-stop code stopped collection as required.
+- Current file was re-read, manual deletions were preserved, and a same-name append/new choice was approved before any merge.
 - Every material claim is grade-labeled and source-indexed; limits stay visible.
 - Final Markdown passes `scripts/validate_obsidian.py`; no unresolved variables or merge conflicts remain.
