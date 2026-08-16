@@ -20,9 +20,9 @@ Use A/B/C as claim strength, not author credibility.
 
 | Grade | Evidence | Permitted wording |
 | --- | --- | --- |
-| A | Direct, attributable post text, screenshot visually checked, or author statement tied to the claim | “来源称/作者表示/截图显示”；state source wording and scope. |
-| B | Consistent independent reports or a clear but indirect account | “多个公开样本显示/可作为准备线索”；do not state a universal rule. |
-| C | Thin, ambiguous, or single unverified indication | “仅见个别样本/待核验”；do not use as a conclusion. |
+| A | substantive first-person direct target-role or genuinely close-role experience, with attributable text/image/timeline/result proof | “来源称/作者表示/截图显示”；state source wording, role proximity, and scope. |
+| B | third-party hiring observation, generic industry experience, adjacent role/recruiting type, or incomplete but substantive report | “多个公开样本显示/可作为准备线索”；directional only, never a universal rule. |
+| C | anonymous salary compilation, marketing, other role, unclear identity, or title-only/subjective thin fragments | “仅见个别样本/待核验”；context only, not a conclusion. |
 
 Keep post text, OCR, author statement, and agent inference separate in the source note. OCR must be marked distinct from source text; uncertain OCR requires a visual check before using material numbers. Empty comments are no evidence. Work experience must be attributed to the author/sample—never to the employer as a fact.
 

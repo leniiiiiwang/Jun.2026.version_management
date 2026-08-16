@@ -8,7 +8,7 @@ date: "{{date}}"
 tags:
   - 求职
   - 岗位调研
-related: "[[相关岗位或公司笔记]]"
+related: "{{related_note}}"
 ---
 
 ## 一页结论

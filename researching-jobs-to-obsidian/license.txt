@@ -1,9 +1,13 @@
 MIT License
 
-Copyright (c) 2026 BrunonXU/Stride28-search2docs
+Copyright (c) 2026 researching-jobs-to-obsidian contributors
 
-This skill is an independent adaptation informed by BrunonXU/Stride28-search2docs
-(https://github.com/BrunonXU/Stride28-search2docs). It contains no vendoring
+The MIT License below applies to this independently authored skill. This
+independent adaptation is distinct from the separately attributed upstream.
+
+Upstream attribution: BrunonXU/Stride28-search2docs
+(https://github.com/BrunonXU/Stride28-search2docs). The upstream project's
+license remains governed by its repository. This skill contains no vendoring
 of that project and does not redistribute its code or data.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy

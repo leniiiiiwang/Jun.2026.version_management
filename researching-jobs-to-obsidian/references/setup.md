@@ -14,6 +14,21 @@ stride28-search-mcp install-browser
 
 Use native arm64 Python on Apple Silicon. The upstream 0.2.1 server imports `mcp.server.fastmcp`; incompatible newer MCP installations can break that import. The client uses an ordinary-Python bootstrap to re-exec into the tool interpreter when its MCP runtime is missing; diagnose with `stride28-search-mcp doctor` rather than mixing interpreters.
 
+## Local Vision OCR
+
+Compile and run `scripts/vision_ocr.m` only into a task temp directory; never write its binary or module cache into the skill or vault. For selected, approved images:
+
+```bash
+ocr_tmp=$(mktemp -d)
+export CLANG_MODULE_CACHE_PATH="$ocr_tmp/clang-module-cache"
+xcrun clang -fobjc-arc -framework Foundation -framework AppKit -framework Vision \
+  scripts/vision_ocr.m -o "$ocr_tmp/vision_ocr"
+"$ocr_tmp/vision_ocr" --self-test
+"$ocr_tmp/vision_ocr" IMAGE
+```
+
+The Vision service may fail in a restricted sandbox. Request approved system-context execution only when needed. If it remains unavailable, retain the image as pending manual/visual review and never invent OCR. Remove only the task-created temp directory after the task.
+
 ## Named profile and browser mode
 
 Require a named profile (never a disposable anonymous path). `scripts/xhs_mcp_client.py` and `download_note_images.py` are Xiaohongshu-specific. Perform Xiaohongshu login visibly once; use headed mode only for login or manual repair. Then run approved Xiaohongshu search and detail batches headless. Headless reduces popups, but is not inherently safer and may change platform detection.

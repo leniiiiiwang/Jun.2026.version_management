@@ -110,10 +110,11 @@ class SkillContractTests(unittest.TestCase):
         )
         for heading in headings:
             self.assertEqual(text.count(f"## {heading}"), 1)
-        for variable in ("{{company}}", "{{role}}", "{{recruiting_type}}", "{{city_scope}}", "{{date}}", "{{source_url}}"):
+        for variable in ("{{company}}", "{{role}}", "{{recruiting_type}}", "{{city_scope}}", "{{date}}", "{{source_url}}", "{{related_note}}"):
             self.assertIn(variable, text)
-        for phrase in ("非官方样本", "不能推断", "竞争信号", "不是官方硬性门槛", "[[", "作者", "发布日期", "URL", "查询词", "等级", "媒介", "招聘类型", "城市", "局限"):
+        for phrase in ("非官方样本", "不能推断", "竞争信号", "不是官方硬性门槛", "作者", "发布日期", "URL", "查询词", "等级", "媒介", "招聘类型", "城市", "局限"):
             self.assertIn(phrase, text)
+        self.assertNotIn("[[相关岗位或公司笔记]]", text)
         self.assertIn("[^source]: {{source_url}}", text)
         self.assertIn("实际证据", text)
         rendered = (
@@ -123,6 +124,7 @@ class SkillContractTests(unittest.TestCase):
             .replace("{{city_scope}}", "杭州")
             .replace("{{date}}", "2026-08-16")
             .replace("{{source_url}}", "https://example.org/evidence/data-analyst")
+            .replace("{{related_note}}", "[[示例关联笔记]]")
         )
         with tempfile.TemporaryDirectory() as raw:
             output = Path(raw) / "rendered.md"
@@ -133,6 +135,22 @@ class SkillContractTests(unittest.TestCase):
                 capture_output=True,
             )
         self.assertEqual((result.returncode, result.stderr), (0, ""), result.stdout)
+
+    def test_ocr_setup_and_evidence_grades_are_release_safe(self):
+        setup, risk = read(SETUP), read(RISK)
+        for phrase in (
+            "mktemp -d", "task temp directory", "CLANG_MODULE_CACHE_PATH", "xcrun clang -fobjc-arc -framework Foundation -framework AppKit -framework Vision",
+            "vision_ocr.m", "--self-test", "IMAGE", "restricted sandbox", "approved system-context execution",
+            "pending manual/visual review", "never invent OCR", "Remove only the task-created temp directory",
+        ):
+            self.assertIn(phrase, setup)
+        for phrase in (
+            "substantive first-person direct target-role", "genuinely close-role", "attributable text/image/timeline/result proof",
+            "third-party hiring observation", "generic industry experience", "adjacent role/recruiting type", "incomplete but substantive report", "directional only",
+            "anonymous salary compilation", "marketing", "other role", "unclear identity", "title-only/subjective thin fragments", "context only",
+            "post text, OCR, author statement, and agent inference separate",
+        ):
+            self.assertIn(phrase, risk)
 
     def test_setup_commands_match_the_xiaohongshu_client_and_zhihu_has_a_safe_route(self):
         setup, risk = read(SETUP), read(RISK)
@@ -159,6 +177,8 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("BrunonXU/Stride28-search2docs", license_text)
         self.assertIn("https://github.com/BrunonXU/Stride28-search2docs", license_text)
         self.assertIn("MIT", license_text)
+        self.assertIn("Copyright (c) 2026 researching-jobs-to-obsidian contributors", license_text)
+        self.assertNotIn("Copyright (c) 2026 BrunonXU/Stride28-search2docs", license_text)
         self.assertIn("independent adaptation", license_text)
         self.assertIn("no vendoring", license_text)
         self.assertIn("MCP <2", read(SETUP))
