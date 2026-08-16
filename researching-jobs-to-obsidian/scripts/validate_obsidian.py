@@ -22,8 +22,8 @@ REQUIRED_HEADINGS = (
 )
 
 _FRONTMATTER_VALUE = re.compile(r"^\s*(?:[^\s:#][^:]*:\s*\S+|-\s+\S+)\s*$")
-_FOOTNOTE_LABEL = re.compile(r"^\[\^([^\]\s]+)\]:")
-_FOOTNOTE_DEFINITION = re.compile(r"^\[\^([^\]\s]+)\]:\s*(https://\S+)\s*$")
+_FOOTNOTE_LABEL = re.compile(r"^ {0,3}\[\^([^\]\s]+)\]:")
+_FOOTNOTE_DEFINITION = re.compile(r"^ {0,3}\[\^([^\]\s]+)\]:\s*(https://\S+)\s*$")
 _FOOTNOTE_REF = re.compile(r"\[\^([^\]\s]+)\]")
 _MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]]*\]\(\s*(?:<([^>]+)>|([^\s)]+))")
 _UNRESOLVED_VARIABLE = re.compile(r"\{\{[^{}]*\}\}")
@@ -49,23 +49,39 @@ def _frontmatter_end(lines: list[str]) -> tuple[int | None, list[str]]:
     return None, ["frontmatter: unterminated YAML block"]
 
 
+def _fence_opener(line: str) -> tuple[str, int] | None:
+    stripped = line.lstrip()
+    if not stripped or stripped[0] not in ("`", "~"):
+        return None
+    character = stripped[0]
+    length = len(stripped) - len(stripped.lstrip(character))
+    return (character, length) if length >= 3 else None
+
+
+def _fence_closes(line: str, character: str, minimum_length: int) -> bool:
+    stripped = line.lstrip()
+    if not stripped.startswith(character * minimum_length):
+        return False
+    length = len(stripped) - len(stripped.lstrip(character))
+    return length >= minimum_length and not stripped[length:].strip()
+
+
 def _content_lines(lines: list[str], start: int) -> list[tuple[int, str]]:
     """Return document lines outside fenced code blocks and footnote definition bodies."""
     result: list[tuple[int, str]] = []
-    in_fence = False
-    fence = ""
+    fence: tuple[str, int] | None = None
     in_footnote = False
     for index, line in enumerate(lines[start:], start):
-        stripped = line.lstrip()
-        marker = stripped[:3]
-        if marker in ("```", "~~~"):
-            if not in_fence:
-                in_fence, fence = True, marker
-            elif marker == fence:
-                in_fence, fence = False, ""
+        opener = _fence_opener(line) if fence is None else None
+        if opener is not None:
+            fence = opener
             in_footnote = False
             continue
-        if in_fence:
+        if fence is not None and _fence_closes(line, *fence):
+            fence = None
+            in_footnote = False
+            continue
+        if fence is not None:
             continue
         if _FOOTNOTE_LABEL.match(line):
             in_footnote = True
@@ -80,18 +96,16 @@ def _content_lines(lines: list[str], start: int) -> list[tuple[int, str]]:
 def _definitions(lines: list[str], start: int) -> tuple[list[tuple[str, str]], list[str]]:
     definitions: list[tuple[str, str]] = []
     errors: list[str] = []
-    in_fence = False
-    fence = ""
+    fence: tuple[str, int] | None = None
     for line in lines[start:]:
-        stripped = line.lstrip()
-        marker = stripped[:3]
-        if marker in ("```", "~~~"):
-            if not in_fence:
-                in_fence, fence = True, marker
-            elif marker == fence:
-                in_fence, fence = False, ""
+        opener = _fence_opener(line) if fence is None else None
+        if opener is not None:
+            fence = opener
             continue
-        if in_fence:
+        if fence is not None and _fence_closes(line, *fence):
+            fence = None
+            continue
+        if fence is not None:
             continue
         label = _FOOTNOTE_LABEL.match(line)
         if not label:
@@ -104,8 +118,14 @@ def _definitions(lines: list[str], start: int) -> tuple[list[tuple[str, str]], l
     return definitions, errors
 
 
-def _normalize_url(url: str) -> str:
-    parts = urlsplit(url)
+def _normalize_url(url: str) -> str | None:
+    try:
+        parts = urlsplit(url)
+        if parts.scheme.lower() != "https" or not parts.hostname:
+            return None
+        parts.port  # Validate malformed ports while retaining the original authority text.
+    except ValueError:
+        return None
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, parts.query, ""))
 
 
@@ -185,7 +205,13 @@ def validate_text(text: str) -> list[str]:
     definition_ids = [identifier for identifier, _ in definitions]
     for identifier in sorted({item for item in definition_ids if definition_ids.count(item) > 1}):
         source_errors.append(f"sources: duplicate definition ID: {identifier}")
-    normalized_urls = [_normalize_url(url) for _, url in definitions]
+    normalized_urls: list[str] = []
+    for identifier, url in definitions:
+        normalized = _normalize_url(url)
+        if normalized is None:
+            source_errors.append(f"sources: invalid HTTPS URL: {identifier}")
+        else:
+            normalized_urls.append(normalized)
     for url in sorted({item for item in normalized_urls if normalized_urls.count(item) > 1}):
         source_errors.append(f"sources: duplicate normalized URL: {url}")
     if not definitions:

@@ -43,6 +43,10 @@ class ValidateTextTests(unittest.TestCase):
         text = valid_brief() + "\n\n---\n\n[relative](notes/company.md)\n![[attachment.png]]"
         self.assertEqual(validator.validate_text(text), [])
 
+    def test_allows_additional_level_two_headings(self):
+        text = valid_brief() + "\n\n## 附录\n补充方法说明。"
+        self.assertEqual(validator.validate_text(text), [])
+
     def test_rejects_empty_or_unterminated_frontmatter(self):
         for text, expected in (
             (valid_brief().replace("title: 岗位调研\ntags:\n  - 求职", "", 1), "frontmatter"),
@@ -82,6 +86,15 @@ class ValidateTextTests(unittest.TestCase):
     def test_rejects_unused_definition(self):
         text = valid_brief() + "\n[^unused]: https://example.net/unused"
         self.assertIn("sources: unused definition: unused", validator.validate_text(text))
+
+    def test_rejects_malformed_https_definition_without_crashing(self):
+        text = valid_brief().replace("https://example.com/a#sample", "https://[")
+        errors = validator.validate_text(text)
+        self.assertIn("sources: invalid HTTPS URL: a", errors)
+
+    def test_allows_footnote_definitions_with_up_to_three_leading_spaces(self):
+        text = valid_brief().replace("\n[^", "\n   [^")
+        self.assertEqual(validator.validate_text(text), [])
 
     def test_rejects_duplicate_source_id_and_normalized_url(self):
         text = valid_brief() + "\n[^c]: https://EXAMPLE.com/a#other\n引用[^c]"
@@ -136,6 +149,15 @@ class ValidateTextTests(unittest.TestCase):
         ) + "\n```\n## 薪资待遇\n{{ignored}}\nTODO\n<<<<<<< HEAD\n[^fake]: https://example.net/fake\n```"
         self.assertEqual(validator.validate_text(text), [])
 
+    def test_ignores_content_until_a_matching_long_fence_closes(self):
+        for character in ("`", "~"):
+            with self.subTest(character=character):
+                text = valid_brief() + (
+                    f"\n{character * 4}\n## 薪资待遇\n{{{{ignored}}}}\nTODO\n"
+                    f"<<<<<<< HEAD\n{character * 3}\n## 入职门槛\n{{{{still_ignored}}}}\n{character * 4}"
+                )
+                self.assertEqual(validator.validate_text(text), [])
+
     def test_all_failures_have_stable_category_order(self):
         errors = validator.validate_text("no frontmatter\n{{x}}\nTODO\n<<<<<<< HEAD")
         categories = [error.split(":", 1)[0] for error in errors]
@@ -175,6 +197,15 @@ class ValidateFileAndCliTests(unittest.TestCase):
             self.assertEqual(absent.stdout, "ERROR: cannot read supplied file\n")
             self.assertEqual(misuse.returncode, 2)
             self.assertIn("ERROR: expected one Markdown path", misuse.stdout)
+
+    def test_cli_reports_malformed_https_definition_as_validation_failure(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "malformed-url.md"
+            path.write_text(valid_brief().replace("https://example.com/a#sample", "https://["), encoding="utf-8")
+            result = subprocess.run([sys.executable, str(MODULE_PATH), str(path)], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("ERROR: sources: invalid HTTPS URL: a", result.stdout)
+            self.assertNotIn("Traceback", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
