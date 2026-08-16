@@ -270,6 +270,25 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["stopped_on"], "invalid_envelope")
         self.assertEqual(record["envelope"]["error"], {"code": "invalid_envelope", "message": "invalid tool envelope"})
 
+    async def test_login_required_stops_after_persisting_one_record(self):
+        calls = []
+
+        async def call_tool(name, arguments):
+            calls.append(arguments["query"])
+            return {"ok": False, "error": {"code": "login_required"}}
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            summary = await xhs.execute_batch(
+                [{"key": "first", "query": "a"}, {"key": "second", "query": "b"}],
+                "search", call_tool, output_dir, 0,
+            )
+            record = json.loads((output_dir / "first.json").read_text(encoding="utf-8"))
+        self.assertEqual(calls, ["a"])
+        self.assertEqual(summary["other_failures"], 1)
+        self.assertEqual(summary["stopped_on"], "login_required")
+        self.assertEqual(record["envelope"]["error"]["code"], "login_required")
+
     async def test_detail_output_uses_detail_tool_and_contract_shape(self):
         async def call_tool(name, arguments):
             self.assertEqual(name, "get_note_detail")
@@ -476,6 +495,67 @@ class CliTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OutputSafetyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_batch_item_caps_reject_before_output_or_tool_and_allow_exact_limits(self):
+        over_limit_cases = [
+            ("search", [{"key": f"s{index}", "query": str(index)} for index in range(3)]),
+            ("detail", [{"key": f"d{index}", "note_id": str(index)} for index in range(7)]),
+        ]
+        for mode, items in over_limit_cases:
+            with self.subTest(mode=mode):
+                calls = []
+
+                async def call_tool(*args):
+                    calls.append(args)
+
+                with tempfile.TemporaryDirectory() as directory:
+                    output_dir = Path(directory) / "out"
+                    with self.assertRaises(ValueError):
+                        await xhs.execute_batch(items, mode, call_tool, output_dir, 0)
+                    self.assertFalse(output_dir.exists())
+                self.assertEqual(calls, [])
+
+        for mode, items in (
+            ("search", [{"key": f"s{index}", "query": str(index)} for index in range(2)]),
+            ("detail", [{"key": f"d{index}", "note_id": str(index)} for index in range(6)]),
+        ):
+            with self.subTest(mode=mode, allowed=True):
+                calls = []
+
+                async def call_tool(name, arguments):
+                    calls.append((name, arguments))
+                    return {"ok": True}
+
+                with tempfile.TemporaryDirectory() as directory:
+                    await xhs.execute_batch(items, mode, call_tool, Path(directory) / "out", 0)
+                self.assertEqual(len(calls), len(items))
+
+    async def test_over_limit_manifest_does_not_open_session_or_create_output(self):
+        opened = False
+
+        def unexpected_session(*args, **kwargs):
+            nonlocal opened
+            opened = True
+            raise AssertionError("session must not open for an over-limit manifest")
+
+        original_open = xhs.open_mcp_session
+        xhs.open_mcp_session = unexpected_session
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                manifest = root / "manifest.json"
+                output_dir = root / "out"
+                manifest.write_text(
+                    json.dumps({"mode": "search", "items": [{"key": f"q{index}", "query": str(index)} for index in range(3)]}),
+                    encoding="utf-8",
+                )
+                args = SimpleNamespace(manifest=str(manifest), output_dir=str(output_dir), profile="codex", rate_limit="12", server_command="fake", delay=12)
+                with self.assertRaises(ValueError):
+                    await xhs._run_batch(args, "search")
+                self.assertFalse(output_dir.exists())
+        finally:
+            xhs.open_mcp_session = original_open
+        self.assertFalse(opened)
+
     async def test_writable_probe_has_no_residue_and_probe_failure_stops_before_session_or_tool(self):
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory) / "empty-output"

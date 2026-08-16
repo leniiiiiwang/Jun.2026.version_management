@@ -16,9 +16,11 @@ from collections.abc import Mapping
 
 
 RISK_CODES = {"captcha_detected", "search_blocked", "risk_cooldown_active"}
+TERMINAL_ERROR_CODES = {"login_required"}
 KEY_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 PROFILE_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 TOOL_NAMES = {"search": "search_xiaohongshu", "detail": "get_note_detail"}
+BATCH_ITEM_LIMITS = {"search": 2, "detail": 6}
 SUMMARY_FIELDS = ("total", "attempted", "succeeded", "timed_out", "other_failures", "stopped_on")
 
 
@@ -149,6 +151,8 @@ def _validated_items(items, mode):
         raise ValueError("mode must be 'search' or 'detail'")
     if not isinstance(items, list):
         raise ValueError("manifest items must be a list")
+    if len(items) > BATCH_ITEM_LIMITS[mode]:
+        raise ValueError(f"{mode} batches allow at most {BATCH_ITEM_LIMITS[mode]} items")
     validated = []
     seen_keys = set()
     for item in items:
@@ -234,7 +238,7 @@ async def execute_batch(items, mode, call_tool, output_dir, delay_seconds, sleep
                 summary["timed_out"] += 1
             else:
                 summary["other_failures"] += 1
-            if terminal_failure or code in RISK_CODES:
+            if terminal_failure or code in RISK_CODES or code in TERMINAL_ERROR_CODES:
                 summary["stopped_on"] = code
                 break
         if index < len(validated) - 1:
