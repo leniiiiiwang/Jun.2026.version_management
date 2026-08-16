@@ -23,6 +23,10 @@ def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def checkpoint_numbers(text: str) -> list[int]:
+    return [int(number) for number in re.findall(r"^### Checkpoint\s+([0-9]+)\b", text, re.M)]
+
+
 class SkillContractTests(unittest.TestCase):
     def test_frontmatter_is_minimal_and_discoverable(self):
         text = read(SKILL)
@@ -40,8 +44,8 @@ class SkillContractTests(unittest.TestCase):
 
     def test_skill_has_only_three_named_checkpoints_and_uses_references(self):
         text = read(SKILL)
-        checkpoints = re.findall(r"^### Checkpoint\s+([123])\b", text, re.M)
-        self.assertEqual(checkpoints, ["1", "2", "3"])
+        checkpoints = checkpoint_numbers(text)
+        self.assertEqual(checkpoints, [1, 2, 3])
         for phrase in ("scope, budget, and destination", "detail sample", "A/B/C retention", "filename", "same-name"):
             self.assertIn(phrase, text)
         self.assertIn("references/setup.md", text)
@@ -50,32 +54,26 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("before details", text)
         self.assertIn("before vault write", text)
 
-    def test_core_skill_surfaces_the_operating_contract_when_explaining_or_simulating(self):
-        """Plans must preserve safety controls, rather than hiding them in references."""
+    def test_core_skill_contains_plan_presentation_contract(self):
+        """The core skill, not a reference, must make plans operationally safe."""
         text = read(SKILL)
-        for phrase in (
-            "When presenting the plan",
-            "simulate or explain",
-            "named persistent profile",
-            "current-login check",
-            "Checkpoint 1 approval",
-            "visible login/manual repair only if needed",
-            "After successful login, search and detail collection are headless",
-            "no visible fallback during a batch",
-            "one MCP/browser session per batch",
-            "12 seconds/180 seconds",
-            "20 seconds/300 seconds",
-            "2 seconds",
-            "search_timeout",
-            "captcha_detected",
-            "search_blocked",
-            "risk_cooldown_active",
-            "exactly three combined checkpoints",
-            "re-read the current file",
-            "manual deletions",
-            "same-name append/new choice",
-        ):
-            self.assertIn(phrase, text)
+        self.assertRegex(text, r"(?i)when\s+presenting\s+the\s+plan")
+        self.assertRegex(text, r"(?i)simulate\s+or\s+explain")
+        self.assertRegex(text, r"(?i)exactly\s+three\s+combined\s+checkpoints")
+        self.assertRegex(text, r"(?i)named\s+persistent\s+profile")
+        self.assertRegex(text, r"(?i)current[-\s]login\s+check")
+        self.assertRegex(text, r"(?is)Checkpoint\s+1\s+approval.*?visible\s+login\s*/\s*manual\s+repair.*?only\s+if\s+needed")
+        self.assertRegex(text, r"(?is)successful\s+login.*?search\s+and\s+detail.*?headless.*?no\s+visible\s+fallback.*?batch")
+        self.assertRegex(text, r"(?i)one\s+MCP\s*/\s*browser\s+session\s+per\s+batch")
+        self.assertRegex(text, r"(?is)(?:search.*?12\s*seconds|12\s*seconds.*?search)")
+        self.assertRegex(text, r"(?is)(?:search.*?(?:180\s*seconds|3\s*min)|(?:180\s*seconds|3\s*min).*?search)")
+        self.assertRegex(text, r"(?is)(?:details?.*?20\s*seconds|20\s*seconds.*?details?)")
+        self.assertRegex(text, r"(?is)(?:details?.*?(?:300\s*seconds|5\s*min)|(?:300\s*seconds|5\s*min).*?details?)")
+        self.assertRegex(text, r"(?is)(?:images?.*?2\s*seconds|2\s*seconds.*?images?)")
+        self.assertRegex(text, r"(?is)search_timeout.*?(?:continue|without\s+retry|no\s+retry)")
+        for code in ("captcha_detected", "search_blocked", "risk_cooldown_active"):
+            self.assertRegex(text, rf"(?is){code}.*?hard\s+stops?")
+        self.assertRegex(text, r"(?is)re-read\s+the\s+current\s+file.*?manual\s+deletions.*?same-name\s+append/new\s+choice")
 
     def test_collection_defaults_and_safety_boundaries_are_documented(self):
         combined = "\n".join(read(path) for path in (SKILL, SETUP, RISK))
