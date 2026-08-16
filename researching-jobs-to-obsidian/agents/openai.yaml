@@ -1,0 +1,4 @@
+interface:
+  display_name: "Job Research to Obsidian"
+  short_description: "低频采集岗位信息并生成可审计 Obsidian 岗位笔记"
+  default_prompt: "Use $researching-jobs-to-obsidian to research a company and role and write an evidence-graded Obsidian job brief."
