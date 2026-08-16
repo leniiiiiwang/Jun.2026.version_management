@@ -63,4 +63,4 @@ related: "[[相关岗位或公司笔记]]"
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | [^sample] | 待填 | 待填 | 见脚注 | {{role}} 面试 | C | Xiaohongshu | {{recruiting_type}} | {{city_scope}} | 模板示例，未核验 |
 
-[^sample]: https://example.com/job-research/{{company}}/{{role}}
+[^sample]: https://example.com/job-research/sample

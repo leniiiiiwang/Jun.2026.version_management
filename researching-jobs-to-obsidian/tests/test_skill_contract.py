@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import subprocess
+import sys
+import tempfile
 import unittest
 
 
@@ -86,7 +89,43 @@ class SkillContractTests(unittest.TestCase):
             self.assertIn(variable, text)
         for phrase in ("非官方样本", "不能推断", "竞争信号", "不是官方硬性门槛", "[[", "作者", "发布日期", "URL", "查询词", "等级", "媒介", "招聘类型", "城市", "局限"):
             self.assertIn(phrase, text)
-        self.assertRegex(text, r"\[\^[^]]+\]: https://[^\s]*\{\{(?:company|role|recruiting_type|city_scope|date)\}\}")
+        self.assertIn("[^sample]: https://example.com/job-research/sample", text)
+        rendered = (
+            text.replace("{{company}}", "示例公司")
+            .replace("{{role}}", "Data Analyst")
+            .replace("{{recruiting_type}}", "校招")
+            .replace("{{city_scope}}", "杭州")
+            .replace("{{date}}", "2026-08-16")
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            output = Path(raw) / "rendered.md"
+            output.write_text(rendered, encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "validate_obsidian.py"), str(output)],
+                text=True,
+                capture_output=True,
+            )
+        self.assertEqual((result.returncode, result.stderr), (0, ""), result.stdout)
+
+    def test_setup_commands_match_the_xiaohongshu_client_and_zhihu_has_a_safe_route(self):
+        setup, risk = read(SETUP), read(RISK)
+        self.assertIn(
+            "uv tool install --python 3.11 --force --with 'mcp[cli]<2' 'stride28-search-mcp==0.2.1'",
+            setup,
+        )
+        self.assertIn("stride28-search-mcp doctor", setup)
+        self.assertIn("stride28-search-mcp install-browser", setup)
+        self.assertRegex(setup, r"search-batch\s+\\?\s*\n\s*\./search-manifest\.json --output-dir")
+        self.assertRegex(setup, r"detail-batch\s+\\?\s*\n\s*\./detail-manifest\.json --output-dir")
+        self.assertNotIn("--manifest", setup)
+        combined = f"{setup}\n{risk}"
+        for phrase in (
+            "Xiaohongshu-specific", "Zhihu", "login_zhihu", "search_zhihu", "get_zhihu_question",
+            "one persistent session per batch", "same checkpoints", "same budgets", "no-retry", "evidence rules",
+            "platform risk/verification/login restriction", "never bypass", "Normalize saved Zhihu sources",
+            "image downloader only applies to successful Xiaohongshu detail envelopes",
+        ):
+            self.assertIn(phrase.lower(), combined.lower())
 
     def test_attribution_agent_manifest_and_no_packaged_sensitive_data(self):
         license_text = read(LICENSE)

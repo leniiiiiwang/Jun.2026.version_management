@@ -12,6 +12,8 @@ At Checkpoint 2, present the candidate sample before details. Detail defaults ar
 
 For `search_timeout`, save the failure, use no retry, and continue with the remaining items. `captcha_detected`, `search_blocked`, and `risk_cooldown_active` are hard stops: retain the current record, stop the batch, and report the code. Headed login/manual repair only occurs outside an active batch after user approval. Download images at >=2 seconds apart.
 
+For Zhihu, run `login_zhihu` visibly only when needed, then `search_zhihu` and `get_zhihu_question` in one persistent session per batch. Use the same checkpoints, same budgets, no-retry behavior, and evidence rules. A platform risk/verification/login restriction stops collection; never bypass it. Xiaohongshu hard-stop codes are not asserted to apply identically to Zhihu. Normalize saved Zhihu sources for the document/source index. The image downloader only applies to successful Xiaohongshu detail envelopes.
+
 ## Evidence grades and permitted claims
 
 Use A/B/C as claim strength, not author credibility.
