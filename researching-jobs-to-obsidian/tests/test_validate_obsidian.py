@@ -63,6 +63,28 @@ class ValidateTextTests(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertTrue(any(expected in error for error in validator.validate_text(text)))
 
+    def test_rejects_unresolved_variables_in_frontmatter(self):
+        for assignment in ("company: {{company}}", "role: {{role}}"):
+            with self.subTest(assignment=assignment):
+                text = valid_brief().replace("title: 岗位调研", assignment)
+                self.assertIn("document: unresolved variable", validator.validate_text(text))
+
+    def test_rejects_each_merge_conflict_marker_in_frontmatter(self):
+        for marker in ("<<<<<<< HEAD", "=======", ">>>>>>> branch"):
+            with self.subTest(marker=marker):
+                text = valid_brief().replace("title: 岗位调研", f"title: 岗位调研\n{marker}")
+                self.assertIn("document: merge conflict marker", validator.validate_text(text))
+
+    def test_resolved_frontmatter_remains_valid(self):
+        text = valid_brief().replace("title: 岗位调研", "company: 示例公司\nrole: 内容策略运营")
+        self.assertEqual(validator.validate_text(text), [])
+
+    def test_deduplicates_frontmatter_and_body_marker_errors(self):
+        text = valid_brief().replace("title: 岗位调研", "title: {{company}}\n<<<<<<< HEAD") + "\n{{role}}\n>>>>>>> branch"
+        errors = validator.validate_text(text)
+        self.assertEqual(errors.count("document: unresolved variable"), 1)
+        self.assertEqual(errors.count("document: merge conflict marker"), 1)
+
     def test_reports_each_missing_heading(self):
         for heading in validator.REQUIRED_HEADINGS:
             with self.subTest(heading=heading):

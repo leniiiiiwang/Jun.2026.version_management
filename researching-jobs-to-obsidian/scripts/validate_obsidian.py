@@ -157,7 +157,7 @@ def _mask_inline_code_and_escaped_syntax(text: str) -> str:
     masked = list(text)
     index = 0
     while index < len(text):
-        if text[index] == "\\" and index + 1 < len(text) and text[index + 1] in "[]()`\\":
+        if text[index] == "\\" and index + 1 < len(text) and text[index + 1] in "[]()`\\{}":
             masked[index] = "\0"
             masked[index + 1] = "\0"
             index += 2
@@ -206,6 +206,8 @@ def validate_text(text: str) -> list[str]:
 
     frontmatter_end, errors = _frontmatter_end(lines)
     content_start = 0 if frontmatter_end is None else frontmatter_end + 1
+    frontmatter_lines = lines[1:] if frontmatter_end is None else lines[1:frontmatter_end]
+    frontmatter_text = "\n".join(frontmatter_lines)
 
     document_errors: list[str] = []
     source_errors: list[str] = []
@@ -226,11 +228,13 @@ def validate_text(text: str) -> list[str]:
         elif len(positions[heading]) > 1:
             document_errors.append(f"document: duplicate heading: {heading}")
 
-    if _UNRESOLVED_VARIABLE.search(content_text):
+    if _UNRESOLVED_VARIABLE.search(frontmatter_text) or _UNRESOLVED_VARIABLE.search(scannable_text):
         document_errors.append("document: unresolved variable")
     if _IMPLEMENTATION_MARKER.search(content_text):
         document_errors.append("document: implementation marker")
-    if any(_CONFLICT_MARKER.match(line) for _, line in content):
+    if any(_CONFLICT_MARKER.match(line) for line in frontmatter_lines) or any(
+        _CONFLICT_MARKER.match(line) for _, line in content
+    ):
         document_errors.append("document: merge conflict marker")
     for match in _MARKDOWN_LINK.finditer(scannable_text):
         target = (match.group(1) or match.group(2)).strip()
