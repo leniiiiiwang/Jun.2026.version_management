@@ -345,6 +345,19 @@ class McpBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CliTests(unittest.IsolatedAsyncioTestCase):
+    def test_cli_profiles_are_trimmed_and_reject_blank_or_unsafe_values_before_bootstrap(self):
+        parser = xhs._parser()
+        self.assertEqual(parser.parse_args(["list-tools", "--profile", " codex "]).profile, "codex")
+        for profile in ("", "   ", "shared/default", "has space", ".."):
+            with self.subTest(profile=profile), redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(["list-tools", "--profile", profile])
+
+        with patch.object(xhs, "_bootstrap_mcp_runtime") as bootstrap, redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                xhs.main(["list-tools", "--profile", "unsafe/profile"])
+        bootstrap.assert_not_called()
+
     async def test_all_cli_subcommands_apply_their_headless_rate_and_delay_contracts(self):
         opened, calls = [], []
 
@@ -463,6 +476,44 @@ class CliTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OutputSafetyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_writable_probe_has_no_residue_and_probe_failure_stops_before_session_or_tool(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "empty-output"
+            prepared = xhs._prepare_output_dir(output_dir)
+            self.assertEqual(prepared, output_dir.resolve())
+            self.assertEqual(list(prepared.iterdir()), [])
+
+        calls, opened = [], False
+
+        async def call_tool(*args):
+            calls.append(args)
+
+        def unexpected_session(*args, **kwargs):
+            nonlocal opened
+            opened = True
+            raise AssertionError("session must not open when write probe fails")
+
+        original_open = xhs.open_mcp_session
+        xhs.open_mcp_session = unexpected_session
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                manifest = root / "manifest.json"
+                output_dir = root / "out"
+                manifest.write_text(json.dumps({"mode": "search", "items": [{"key": "q", "query": "a"}]}), encoding="utf-8")
+                args = SimpleNamespace(manifest=str(manifest), output_dir=str(output_dir), profile="codex", rate_limit="12", server_command="fake", delay=12)
+                with patch.object(xhs.tempfile, "mkstemp", side_effect=PermissionError("denied")):
+                    with self.assertRaises(ValueError):
+                        await xhs.execute_batch([{"key": "q", "query": "a"}], "search", call_tool, output_dir, 0)
+                    with self.assertRaises(ValueError):
+                        await xhs._run_batch(args, "search")
+                self.assertTrue(output_dir.exists())
+                self.assertEqual(list(output_dir.iterdir()), [])
+        finally:
+            xhs.open_mcp_session = original_open
+        self.assertEqual(calls, [])
+        self.assertFalse(opened)
+
     async def test_rejects_duplicate_casefold_and_reserved_keys_before_calling_tool(self):
         cases = [
             [{"key": "same", "query": "a"}, {"key": "same", "query": "b"}],

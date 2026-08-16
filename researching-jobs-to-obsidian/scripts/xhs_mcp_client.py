@@ -17,6 +17,7 @@ from collections.abc import Mapping
 
 RISK_CODES = {"captcha_detected", "search_blocked", "risk_cooldown_active"}
 KEY_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+PROFILE_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 TOOL_NAMES = {"search": "search_xiaohongshu", "detail": "get_note_detail"}
 SUMMARY_FIELDS = ("total", "attempted", "succeeded", "timed_out", "other_failures", "stopped_on")
 
@@ -168,6 +169,8 @@ def _validated_items(items, mode):
 
 def _prepare_output_dir(output_dir):
     path = Path(output_dir)
+    descriptor = None
+    probe = None
     try:
         if path.exists() or path.is_symlink():
             if path.is_symlink() or not path.is_dir():
@@ -176,8 +179,22 @@ def _prepare_output_dir(output_dir):
                 raise ValueError("output directory must be new or empty")
         else:
             path.mkdir(parents=True)
+        path = path.resolve(strict=True)
+        descriptor, probe = tempfile.mkstemp(
+            prefix=".xhs-write-probe.", suffix=".tmp", dir=path, text=True,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = None
+            handle.write("probe\n")
+            handle.flush()
+            os.fsync(handle.fileno())
     except OSError as exc:
         raise ValueError("output directory is unavailable") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if probe is not None and os.path.exists(probe):
+            os.unlink(probe)
     return path
 
 
@@ -300,19 +317,29 @@ def _finite_rate_limit(minimum):
     return parse
 
 
+def _profile_name(value):
+    try:
+        profile = _nonblank_string(value, "profile")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a named profile") from exc
+    if profile in {".", ".."} or not PROFILE_PATTERN.fullmatch(profile):
+        raise argparse.ArgumentTypeError("must be a named profile")
+    return profile
+
+
 def _parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server-command", default="stride28-search-mcp")
     subparsers = parser.add_subparsers(dest="command", required=True)
     for name in ("list-tools", "login"):
         subparser = subparsers.add_parser(name)
-        subparser.add_argument("--profile", required=True)
+        subparser.add_argument("--profile", type=_profile_name, required=True)
         subparser.add_argument("--rate-limit", type=_finite_rate_limit(12), default="12")
     for name, delay, rate_limit in (("search-batch", 12, 12), ("detail-batch", 20, 20)):
         subparser = subparsers.add_parser(name)
         subparser.add_argument("manifest")
         subparser.add_argument("--output-dir", required=True)
-        subparser.add_argument("--profile", required=True)
+        subparser.add_argument("--profile", type=_profile_name, required=True)
         subparser.add_argument("--delay", type=_finite_float(delay), default=delay)
         subparser.add_argument("--rate-limit", type=_finite_rate_limit(rate_limit), default=str(rate_limit))
     return parser
